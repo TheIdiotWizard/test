@@ -1,7 +1,7 @@
 From de9b1184195f17d16db874b4a20bf6f340893508 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Wed, 4 Nov 2026 14:02:58 +0000
-Subject: [PATCH 4/4] Fix: keys and ROUT SEL notes sounding another track while
+Subject: [PATCH 4/6] Fix: keys and ROUT SEL notes sounding another track while
  the UI borrows the selection
 
 Stage's track rows (cur_entry for each row), MIDI LEARN and a new project set song.sel to another

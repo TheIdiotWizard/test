@@ -13,6 +13,10 @@ The firmware in `firmware/melodee-1.6.1.fwsc` is [keremimo/melodee](https://gith
 4. `0004-…` — fix (also in upstream Melodee): a key, or a ROUT SEL MIDI note, could play another track's sound
    when it arrived while the screen code briefly selected that track (Stage draws each track's row that way).
 5. `0005-…` — test harness only (also in upstream): TRACKS overran two 4-second render buffers and crashed.
+6. `0006-…` — effects in Araminta's style: each track's three slots run as CHAIN inserts again (KNOB 3 sets ORDER);
+   each shared slot is SEND or MASTER (KNOB 3 USE; ROUTE moved to RETURN); a new tempo-synced DELAY; REVERB and
+   DELAY run once each. Also the DUSK colour theme, and GLO WEIGHTS for P5, FM6, DRUM, PHASE, LOFI, VOICE, TRIO,
+   WHEEL and PHYS (CZ-1 and SID rows removed).
 
 ```
 git clone https://github.com/keremimo/melodee && cd melodee && git checkout 165d177

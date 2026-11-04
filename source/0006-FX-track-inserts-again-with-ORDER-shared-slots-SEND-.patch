@@ -1,0 +1,1783 @@
+From 9ce695a7f9adf0d2ff6cd2c27c11ccc825924986 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 4 Nov 2026 20:33:41 +0000
+Subject: [PATCH 6/6] FX: track inserts again with ORDER, shared slots SEND or
+ MASTER, DELAY; DUSK theme; weights for the Felucca engines
+
+- Track racks run their three slots as CHAIN inserts again (any audio
+  effect or note effect); KNOB 3 sets ORDER.
+- Shared slots: KNOB 3 sets USE (SEND or MASTER); a MASTER slot runs on
+  the whole mix before punch and MASTER volume. ROUTE moves to RETURN.
+- DELAY: a tempo-synced half-rate delay (1/32 .. 1/2, up to 0.74 s),
+  feedback and tone. REVERB and DELAY run once each across all racks.
+- fx_state lives in the pool; older projects' track inserts load again.
+- DUSK colour theme: CONTRAST with muted purple, pink, yellow, green tracks.
+- GLO WEIGHTS: P5 FM6 DRUM PHASE / LOFI VOICE TRIO WHEEL / PHYS BUDGET
+  GUARD; CZ-1 and SID rows removed from the shipping build.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_0131vpfZVN4vprBnQkpmn5yn
+---
+ README.md                          |  56 +++++----
+ firmware/src/core.h                |  42 +++++--
+ firmware/src/fx.c                  | 139 +++++++++++++++++++---
+ firmware/src/main.c                |   1 +
+ firmware/src/mix.c                 |  63 ++++++++--
+ firmware/src/params.c              |  84 ++++++++++---
+ firmware/src/project.c             |  15 ++-
+ firmware/src/settings_persist.c    |  23 +++-
+ firmware/src/ui_input.c            |  66 ++++++++++-
+ firmware/src/ui_pages.c            |  11 +-
+ firmware/src/ui_popup.c            |   2 +-
+ firmware/src/voice.c               |   5 +
+ tests/fx_dormant_test.c            |   3 +-
+ tests/fx_kernel_fixture.h          |   2 +
+ tests/fx_routes_test.c             | 182 +++++++++++++++++++++++++++++
+ tests/fx_test.c                    |  37 +++---
+ tests/midi_insert_test.c           |  10 +-
+ tests/midi_knob_test.c             |   2 +-
+ tests/retired_fx_test.c            |  10 +-
+ tests/run_tests.sh                 |   2 +
+ tests/sloop_fx_test.c              |   2 +-
+ tests/theme_test.c                 |   4 +-
+ tests/ui_render.c                  |   2 +-
+ tests/ui_test.c                    |   2 +-
+ tests/upreset_test.c               |   4 +-
+ tests/usb_audio_tracks_test.c      |   2 +-
+ tests/voice_weights_felucca_test.c |  70 +++++++++++
+ tools/gen_ui_palettes.py           |   5 +-
+ web/editor.html                    |   4 +-
+ web/manual/index.html              |  19 +--
+ web/test_web.mjs                   |   9 +-
+ 31 files changed, 742 insertions(+), 136 deletions(-)
+ create mode 100644 tests/fx_routes_test.c
+ create mode 100644 tests/voice_weights_felucca_test.c
+
+diff --git a/README.md b/README.md
+index af752a6..32bbcee 100644
+--- a/README.md
++++ b/README.md
+@@ -552,7 +552,7 @@ user presets saved by earlier Melodee versions are not imported, and the user sa
+   RECENT, with knob acceleration; factory presets, 384 shared user slots and 32 projects, named on the device, in one
+   storage pool; a startup project and a template for new projects; projects from Melodee 1.0 or later load
+ - **Screen:** Melodee's own look: Rubik type, icons drawn for Melodee, every track in its own colour (the screen takes the
+-  selected track's, each knob a shade of it), eight palettes: NIGHT, DAY, CONTRAST, SUNSET, OCEAN, NEON, CANDY and LO-FI
++  selected track's, each knob a shade of it), nine palettes: NIGHT, DAY, CONTRAST, SUNSET, OCEAN, NEON, CANDY, LO-FI and DUSK (CONTRAST with muted purple, pink, yellow and green tracks)
+ - **Stage (HOME):** the selected track's own four knobs (its engine's: the Prophet's cutoff, resonance, filter envelope
+   and release, the CZ-1's wave, DCW, detune and vibrato), the notes and chord it plays in front of the live waveform
+   (the last voicing stays after release; a DRUM track lights its lanes as they hit), and a lane per track: its sound,
+@@ -657,8 +657,8 @@ Thanks to [@aroum](https://github.com/aroum) for the detailed feedback in
+   the project's, saved and loaded with it (power-on: the BOOT project's, the template's or 120);
+   on GLO > GLOBAL, A4, BUDGET and CLK are the device's and stay when you load a project, while TUNE, and SYSTEM's
+   MIDI and ROUT, come back at power-on but follow the project or template you load
+-- **GLO > WEIGHTS** sets how many BUDGET points one voice of **P5** (Prophet), **CZ-1**, **FM6** and **SID** costs;
+-  **WEIGHTS 2** has **DRUM**, **BUDGET** and **GUARD**. AUTO keeps the built-in cost; 1–15 replaces it, so a
++- **GLO > WEIGHTS** sets how many BUDGET points one voice of **P5** (Prophet), **FM6**, **DRUM** and **PHASE** costs;
++  **WEIGHTS 2** has **LOFI**, **VOICE**, **TRIO** and **WHEEL**; **WEIGHTS 3** has **PHYS**, **BUDGET** and **GUARD**. AUTO keeps the built-in cost; 1–15 replaces it, so a
+   heavier weight lets fewer voices of that engine start. **GUARD ON** lets an audio overload cut releasing voices. With
+   **OFF** (default) the audio may glitch instead, and an overload that lasts several seconds can freeze the panel and
+   restart the FM-1. Device settings, kept across projects
+@@ -888,19 +888,30 @@ replaces that event. **RECORDING FULL** leaves existing recordings intact; clear
+ recorded steps makes space for new takes. Notes held longer than 128
+ nominal steps are capped at that duration.
+ 
+-Each track has **three note-effect slots** for **Note tail** (envelope release) and
+-**Note echo** (note repeats with tempo divisions and velocity decay), followed by a
+-**Shared** row. Audio processors run in the shared rack. Press **FX** for the track's
+-rack; KNOB 2 selects its row, KNOB 1 the effect, and KNOB 4 its amount. OCT+ opens the
+-selected slot, its effect picker if empty, or the shared rack; SELECT visits the racks
+-and occupied slots. Note tail has its single REL control on the rack; Note echo has
+-LEVEL, TIME and DECAY on its page.
++Every effect sits in one of two racks, routed as in [Araminta](https://github.com/Wulgaren/Araminta)'s EFFECTS
++list: **CHAIN** on a track, **SEND** or **MASTER** in the shared rack.
+ 
+-The shared rack's audio choices are **Phaser, Width, Formant, Tape, Spit, Room, Reverb,
+-Chorus, Drive, Crush, Flanger, Pedal phaser and Pedal chorus**, grouped into Space,
+-Motion, Dirt and Colour. OCT+ on an empty shared slot opens the effect browser: KNOB 1
+-selects a family, KNOB 2 an effect, and OCT+ confirms. Audio processors in older projects' track
+-slots load OFF; recreate them in the shared rack and set the track's send.
++**A track's rack (FX):** three insert slots in series (CHAIN), then a **Shared** row. A slot holds any audio effect
++or a note effect (**Note tail**, an envelope release, and **Note echo**, note repeats with tempo divisions and
++velocity decay). KNOB 2 selects the row, KNOB 1 the effect, KNOB 3 its **ORDER** (1st, 2nd, 3rd: the effect moves,
++with all its controls, and the row follows) and KNOB 4 its MIX. The Shared row's KNOB 4 is the track's SEND. OCT+
++opens the selected slot, its effect picker if empty, or the shared rack; SELECT visits the racks and occupied slots.
++Note tail has its single REL control on the rack; Note echo has LEVEL, TIME and DECAY on its page.
++
++**The shared rack (SHARED):** three slots and RETURN. KNOB 3 on a slot is its **USE**: **SEND** (fed by the tracks'
++SEND, mixed back at RETURN) or **MASTER** (the whole mix runs through it, after the returns and before the punch FX
++and MASTER volume; KNOB 4 its MIX, dry to wet). KNOB 3 on RETURN is **ROUTE**: in CHAIN each track's SEND feeds the
++SEND slots in series; in SPLIT each SEND slot has its own track send. A MASTER slot shows MASTER on its row, and a
++track's Shared row lists only the slots its SEND reaches.
++
++The audio choices are **Room, Reverb, Delay, Width, Phaser, Chorus, Flanger, Pedal phaser, Pedal chorus, Drive,
++Crush, Formant, Tape and Spit**, grouped into Space, Motion, Dirt and Colour. OCT+ on an empty slot opens the effect
++browser: KNOB 1 selects a family, KNOB 2 an effect, and OCT+ confirms. **Reverb** and **Delay** run once each (their
++tanks take 19 KiB and 32 KiB): choosing one in any slot turns it off where it was.
++
++**Delay** is a tempo-synced mono delay at 22.05 kHz with a 0.74 s tank: TIME (1/32, 1/16T, 1/16, 1/8T, 1/16D, 1/8,
++1/4T, 1/8D, 1/4, 1/2T, 1/4D, 1/2 of the beat; a time longer than the tank is halved until it fits), FDBK (repeats)
++and TONE (the input's cuts), each repeat a little darker. A time change glides like tape.
+ 
+ Phaser sweeps all-pass sections, Width processes the left side with the right
+ dry, Formant makes vowel shapes, Tape drifts smooth crossover filters, and Spit
+@@ -909,14 +920,13 @@ retunes a resonant saturated band. These filters require no audio delay buffer.
+ its controls are MIX, SIZE, DECAY and TONE. **Chorus** uses two modulated stereo
+ taps at 44.1 kHz and **2 KiB per slot**, with MIX, RATE and DEPTH controls.
+ OFF / MIX 0 fades to dry and frees their buffer. A failed allocation leaves the
+-slot dry and shows MEMORY FULL; switch it off and on to retry.
+-
+-**Shared** opens three shared audio slots, with CHAIN or SPLIT routing and a
+-RETURN level. In CHAIN, each track's SEND feeds the three slots in series. In
+-SPLIT, each shared slot has its own track send. Only one shared REVERB can be
+-active. Effects, routing and send levels save with projects and templates; sound
+-changes preserve them. Four mono USB stems are taken after each track's effects
+-and level, before the shared rack; the stereo master includes the shared return.
++slot dry and shows MEMORY FULL; switch it off and on to retry. Each track insert
++costs CPU while it runs; check a full song on the FM-1 when you stack many.
++
++Effects, routing, USE and send levels save with projects and templates; sound
++changes preserve them. Projects that use MASTER or Delay do not load on earlier
++firmware. Four mono USB stems are taken after each track's inserts and level,
++before the shared rack; the stereo master includes the shared returns and MASTER slots.
+ 
+ **SLOOP master punch FX and REVERB are available.** Hold FX and press any of
+ its 27 keys for loops, reverse, tape stop, half speed, filter sweeps, crush,
+diff --git a/firmware/src/core.h b/firmware/src/core.h
+index 4248437..d9165cb 100644
+--- a/firmware/src/core.h
++++ b/firmware/src/core.h
+@@ -166,23 +166,33 @@ enum {                          /* per-track parameters */
+ #define FX_SLOTS 3u
+ #define FX_PARAMS 4u
+ /* Append-only effect IDs; shared pickers leave MIDI-only IDs empty. */
+-enum { FX_OFF, FX_PHASER, FX_WIDTH, FX_FORMANT, FX_TAPE, FX_SPIT, FX_ECHO, FX_ROOM, FX_REVERB, FX_CHORUS, FX_AUDIO_COUNT, FX_MIDIVERB = FX_AUDIO_COUNT, FX_MIDIDELAY, FX_SOFT, FX_HARD, FX_FOLD, FX_FUZZ, FX_CRUSH, FX_FLANGER, FX_PEDAL_PHASER, FX_PEDAL_CHORUS, FX_COUNT };
++enum { FX_OFF, FX_PHASER, FX_WIDTH, FX_FORMANT, FX_TAPE, FX_SPIT, FX_ECHO, FX_ROOM, FX_REVERB, FX_CHORUS, FX_AUDIO_COUNT, FX_MIDIVERB = FX_AUDIO_COUNT, FX_MIDIDELAY, FX_SOFT, FX_HARD, FX_FOLD, FX_FUZZ, FX_CRUSH, FX_FLANGER, FX_PEDAL_PHASER, FX_PEDAL_CHORUS,
++       FX_DELAY, FX_COUNT };   /* FX_DELAY (20): a tempo-synced delay, one at a time (fx.c fx_delay) */
+ /* Slot 6 stays retired. Slot 8 is the SLOOP reverb replacement. */
+ static int fx_retired(int32_t type) { return type == FX_ECHO; }
+ static int fx_sloop_type(int32_t t){return t>=FX_SOFT && t<=FX_PEDAL_CHORUS;}
+ static int fx_sloop_swept(int32_t t){return t>=FX_FLANGER && t<=FX_PEDAL_CHORUS;}
+-static int fx_third_control(int32_t t){return fx_sloop_swept(t) || t==FX_ROOM || t==FX_REVERB;}
++static int fx_third_control(int32_t t){return fx_sloop_swept(t) || t==FX_ROOM || t==FX_REVERB || t==FX_DELAY;}
++/* REVERB and DELAY run once (their tanks: 19 KB, 32 KB): choosing one in a rack takes it from wherever it was */
++static int fx_single(int32_t t){return t==FX_REVERB || t==FX_DELAY;}
++#define FX_DLY_DIVS 12u            /* DELAY's TIME: 1/32 .. 1/2 (params.c N_DLY_DIV), stored in the slot's RATE */
++#define FX_DLY_DEF 5u              /* 1/8 */
+ static int fx_is_midi(int32_t type) { return type == FX_MIDIVERB || type == FX_MIDIDELAY; }
+-#define FX_CHAIN_COUNT 1u /* the shared rack only; tracks retain note-effect controls */
++#define FX_CHAIN_COUNT (NPART+1u) /* the shared rack (states 0..2, as before), then each track's three inserts */
++#define FX_TRACK_SI(ti, slot) (FX_SLOTS * (1u + (ti)) + (slot))
+ #define FX_STATE_COUNT (FX_CHAIN_COUNT*FX_SLOTS)
+ #define FX_TONE_MAX 63
+-static int fx_track_type(int32_t type) { return fx_is_midi(type) ? type : FX_OFF; }
++static int fx_track_type(int32_t type) { return fx_retired(type) ? FX_OFF : type; }   /* (audio inserts as well again) */
+ static void track_fx_normalize(int16_t *p)
+ {
+-    for(uint32_t slot=0;slot<FX_SLOTS;slot++)p[P_FXTYPE+slot*FX_PARAMS]=(int16_t)fx_track_type(p[P_FXTYPE+slot*FX_PARAMS]);
++    for(uint32_t slot=0;slot<FX_SLOTS;slot++){
++        int16_t *v=p+P_FXTYPE+slot*FX_PARAMS;
++        *v=(int16_t)fx_track_type(*v);
++        if(*v==FX_DELAY && (v[2]<0 || v[2]>=(int16_t)FX_DLY_DIVS))v[2]=FX_DLY_DEF;
++    }
+ }
+ static int param_fx_tone(uint32_t id) { return id>=P_FXTONE && id<=P_FX3TONE; }
+-static int fx_has_tone(int32_t type) { return type==FX_ROOM || type==FX_REVERB; }   /* fx.c FX_ECHO, FX_ROOM, FX_REVERB */
++static int fx_has_tone(int32_t type) { return type==FX_ROOM || type==FX_REVERB || type==FX_DELAY; }   /* fx.c FX_ECHO, FX_ROOM, FX_REVERB */
+ static int param_fx(uint32_t id) { return (id>=P_FXTYPE && id<=P_FX3CHAR) || param_fx_tone(id); }
+ /* TONE -63..63 -> the cut it sets (Hz), 0 = FULL (none but the effect's own floor, fx_floor_hz): below 0 a high cut,
+  * 2640 Hz at -1 down to 120 Hz at -63; above 0 a low cut, 150 Hz at 1 up to 1280 Hz at 63 (squared: fine steps where
+@@ -231,20 +241,27 @@ enum {                          /* global parameters */
+  * selected slot. Values and parameter IDs keep their existing wire layout. */
+ static void shared_fx_normalize(int16_t *g)
+ {
+-    uint32_t reverb=0;
++    uint32_t reverb=0,delay=0;
+     for(uint32_t slot=0;slot<FX_SLOTS;slot++){
+         int16_t *type=g+G_MFXTYPE+slot*FX_PARAMS;
+         if(fx_retired(*type) || fx_is_midi(*type)) *type=FX_OFF;
+         if(*type==FX_REVERB){if(reverb)*type=FX_OFF;else reverb=1;}
++        if(*type==FX_DELAY){if(delay)*type=FX_OFF;else delay=1;
++            if(type[2]<0 || type[2]>=(int16_t)FX_DLY_DIVS)type[2]=FX_DLY_DEF;}
+     }
+ }
+ static void shared_fx_select(int16_t *g,uint32_t slot,int32_t type)
+ {
+-    if(type==FX_REVERB)for(uint32_t k=0;k<FX_SLOTS;k++)
+-        if(k!=slot && g[G_MFXTYPE+k*FX_PARAMS]==FX_REVERB)g[G_MFXTYPE+k*FX_PARAMS]=FX_OFF;
++    if(fx_single(type))for(uint32_t k=0;k<FX_SLOTS;k++)
++        if(k!=slot && g[G_MFXTYPE+k*FX_PARAMS]==type)g[G_MFXTYPE+k*FX_PARAMS]=FX_OFF;
+     g[G_MFXTYPE+slot*FX_PARAMS]=(int16_t)type;
++    if(type==FX_DELAY && (g[G_MFXRATE+slot*FX_PARAMS]<0 || g[G_MFXRATE+slot*FX_PARAMS]>=(int16_t)FX_DLY_DIVS))
++        g[G_MFXRATE+slot*FX_PARAMS]=FX_DLY_DEF;
+     shared_fx_normalize(g);
+ }
++/* shared slot k's USE: bit k set, MASTER (the whole mix runs through it, MIX its dry / wet), else SEND. Saved in the
++ * project's FX mode byte pair (project.c PROJ_FX_MODE_OFF + 1) and the template's MODE byte (bits 1..3) */
++static uint8_t fx_master_use;
+ static int param_master_fx(uint32_t id){return id>=G_MFXTYPE && id<=G_MFX3CHAR;}
+ #define G_DRLVL G_RESERVED25         /* (their meaning in a project from before 1.0: proj_drums_to_part) */
+ /* GLO > WEIGHTS: device settings shown on unused ids (params.c page_desc). Never song.g, never in a project
+@@ -255,6 +272,13 @@ static int param_master_fx(uint32_t id){return id>=G_MFXTYPE && id<=G_MFX3CHAR;}
+ #define G_WSID G_RESERVED7
+ #define G_WDRUM G_RESERVED8
+ #define G_SAFETY G_RESERVED9
++/* the shipping engines' weights (MELODEE_FELUCCA_ENGINES): PHASE on CZ-1's id, LOFI on SID's, the rest on spare ones */
++#define G_WPHASE G_RESERVED5
++#define G_WLOFI G_RESERVED7
++#define G_WVOICE G_RESERVED10
++#define G_WTRIO G_RESERVED11
++#define G_WWHEEL G_RESERVED24
++#define G_WPHYS G_RESERVED26
+ #define G_DRREV G_RESERVED26
+ 
+ static int param_reserved(uint32_t id)
+diff --git a/firmware/src/fx.c b/firmware/src/fx.c
+index 956f463..b6405bb 100644
+--- a/firmware/src/fx.c
++++ b/firmware/src/fx.c
+@@ -30,7 +30,9 @@ typedef struct {
+     int32_t rev_bass[2];
+     int16_t rev_rate, rev_char;
+ } fx_state_t;
+-static fx_state_t fx_state[FX_STATE_COUNT];
++/* the shared rack's three states (0..2), then each track's (FX_TRACK_SI): in the pool, not the full ordinary RAM */
++static fx_state_t fx_state[FX_STATE_COUNT] __attribute__((section(".pool")));
++static uint32_t beat_samples(void);                 /* mix.c: a quarter note at the song's tempo (DELAY's TIME) */
+ static volatile uint32_t fx_epoch;
+ static int32_t fx_left[CTL],fx_right[CTL],fx_dry_l[CTL],fx_dry_r[CTL];
+ static int32_t fx_low_l[CTL/4u+1u],fx_low_r[CTL/4u+1u];
+@@ -285,6 +287,40 @@ static __attribute__((noinline,section(".dsp_text"))) void fx_time(fx_state_t *r
+     }
+     f->mix=mix;
+ }
++/* DELAY: a mono tempo-synced delay at half rate (22.05 kHz), 16384 samples (0.74 s, 32 KiB): TIME (the slot's RATE) a
++ * division of the beat, halved until it fits; FDBK (CHAR) the repeats; TONE the wet input's cuts (as ROOM), and every
++ * repeat through a gentle one-pole low-pass. The time glides to a new length (a sample a sample: a tape-like bend, no
++ * click). State: comb[0] the write place, rev_span[0] the target length, pos the length now, damp[0] the repeats' low-pass.
++ * Melodee's own design. */
++#define FX_DLY_N 16384u
++#define FX_DLY_BYTES (FX_DLY_N * 2u)
++static const uint8_t FX_DLY_UNITS[FX_DLY_DIVS] = {3, 4, 6, 8, 9, 12, 16, 18, 24, 32, 36, 48};   /* 24ths of a quarter */
++static uint32_t fx_delay_len(uint32_t div)
++{
++    uint64_t q = (uint64_t)beat_samples() * FX_DLY_UNITS[div < FX_DLY_DIVS ? div : FX_DLY_DEF] / 48u;   /* (half rate) */
++    while (q > FX_DLY_N - 4u) q >>= 1;
++    return q < 8u ? 8u : (uint32_t)q;
++}
++static __attribute__((noinline,section(".audio_text"))) void fx_delay(fx_state_t *restrict f,int16_t *restrict mem,uint32_t n,int32_t target)
++{
++    int32_t mix=f->mix,fb=f->character*215;                  /* (FDBK 127: 0.83) */
++    uint32_t w=f->comb[0]&(FX_DLY_N-1u),len=f->pos?f->pos:f->rev_span[0];
++    for(uint32_t i=0;i<n;i++){
++        if(!f->decim){
++            int32_t in=fx_tone_input(f,fx_div_pow2(fx_left[i]+fx_right[i],1),1.0f/(0.010f*FS/2u));
++            if(len<f->rev_span[0])len++;else if(len>f->rev_span[0])len--;
++            int32_t y=mem[(w-len)&(FX_DLY_N-1u)];
++            f->damp[0]+=fx_div_pow2((y-f->damp[0])*3,2);
++            mem[w]=(int16_t)clamp(fx_div_pow2(in,1)+fx_div_pow2(f->damp[0]*fb,15),-32767,32767);
++            w=(w+1u)&(FX_DLY_N-1u);
++            f->rev_prev_l=f->rev_l;f->rev_l=y*2;
++        }
++        int32_t e=f->decim?fx_div_pow2(f->rev_prev_l+f->rev_l,1):f->rev_l;
++        f->decim^=1u;
++        fx_return(target,FX_DELAY,f->mono,i,e,e,&mix);
++    }
++    f->comb[0]=(uint16_t)w;f->pos=len;f->mix=mix;
++}
+ /* Full-band stereo chorus: two fractional taps, no feedback or filters.
+  * 512 stereo int16 frames cost 2 KiB. The 5.8 ms centre and +/-2.9 ms
+  * modulation fit comfortably in the ring. Sines/divides run once per block;
+@@ -412,11 +448,48 @@ static __attribute__((noinline,section(".dsp_text"))) void fx_copy(fx_state_t *f
+ #endif
+     f->mono=(uint8_t)mono;
+ }
++/* a track's inserts (restored, Melodee 1.3's): the finished track into fx_left / fx_right, positioned by its spread */
++static __attribute__((noinline,section(".audio_text"))) void fx_pan(track_t *t,int32_t *b,uint32_t n)
++{
++    if(!spread_on){
++        for(uint32_t i=0;i<n;i++)fx_left[i]=fx_right[i]=clamp(b[i],-65536,65536);
++        return;
++    }
++    int32_t pan=0,s=spread_on?(t->p[P_SPRD]+1)>>1:0;
++    int32_t pa=clamp(pan-s,-64,63),pb=clamp(pan+s,-64,63);
++    int32_t gla=4096-(pa>0?pa*64:0),gra=4096+(pa<0?pa*64:0),glb=4096-(pb>0?pb*64:0),grb=4096+(pb<0?pb*64:0);
++    for(uint32_t i=0;i<n;i++){
++        int32_t a=spread_on?spread_buf[i]:fx_div_pow2(b[i],1),c=b[i]-a;
++        a=clamp(a,-262143,262143);c=clamp(c,-262143,262143);
++        fx_left[i]=clamp(fx_div_pow2(a*gla+c*glb,12),-65536,65536);fx_right[i]=clamp(fx_div_pow2(a*gra+c*grb,12),-65536,65536);
++    }
++}
++/* Position the finished track once. A mono engine stays mono through its
++ * filter chain even when PAN is slightly off centre; stereo effects and
++ * genuine engine spread retain their independent channels and tails. */
++static __attribute__((noinline,section(".audio_text"))) void fx_post_pan(track_t *t,uint32_t n)
++{
++    int32_t pan=t->p[P_PAN];if(!pan)return;
++    int32_t gl=4096-(pan>0?pan*64:0),gr=4096+(pan<0?pan*64:0);
++    for(uint32_t i=0;i<n;i++){
++        fx_left[i]=fx_scale(fx_left[i],(uint32_t)gl*16u);fx_right[i]=fx_scale(fx_right[i],(uint32_t)gr*16u);
++    }
++}
+ static __attribute__((noinline,section(".audio_text"))) void fx_zero(fx_state_t *f)
+ {
+     typedef uint32_t word_t __attribute__((may_alias));word_t *words=(word_t *)f;for(uint32_t k=0;k<sizeof *f/4u;k++)words[k]=0;
+ }
+ static __attribute__((noinline)) void *fx_memory(uint32_t id,uint32_t bytes){return resource_get(id,bytes);}
++static __attribute__((noinline,section(".audio_text"))) int fx_active(const track_t *t)
++{
++    if (midi_track_only(t)) return 0;
++    uint32_t ti=(uint32_t)(t-trk);
++    for(uint32_t slot=0;slot<FX_SLOTS;slot++){
++        uint32_t base=P_FXTYPE+slot*FX_PARAMS;
++        if((t->p[base] && !fx_is_midi(t->p[base]) && !fx_retired(t->p[base]) && t->p[base+1u]) || fx_state[FX_TRACK_SI(ti,slot)].mix)return 1;
++    }
++    return 0;
++}
+ typedef struct {fx_state_t *f;int16_t *mem;int32_t target;int16_t third;uint8_t active,shared;} fx_plan_t;
+ /* CPU0 owns allocation, releases and control snapshots. A worker receives
+  * only fixed handles, preventing a retired worker from interrupting the arena. */
+@@ -442,12 +515,15 @@ static void fx_slot_prepare(fx_plan_t *plan,uint32_t si,const int16_t *p)
+     }
+     if(f->epoch!=fx_epoch || (type && changed && !f->mix)){
+         resource[RES_FX0+si].size=0;fx_zero(f);
+-        f->epoch=fx_epoch;f->type=(uint8_t)type;f->rng=(int32_t)(0x73a9825du+(NPART*FX_SLOTS+si)*997u);
++        f->epoch=fx_epoch;f->type=(uint8_t)type;   /* (the shared slots' seeds as before; the tracks' as Melodee 1.3's) */
++        f->rng=(int32_t)(0x73a9825du+(si<FX_SLOTS?NPART*FX_SLOTS+si:si-FX_SLOTS)*997u);
+     }
+     f->rate=(int16_t)clamp(p[2],0,127);f->character=(int16_t)clamp(p[3],0,127);
++    uint32_t shared_si=si<FX_SLOTS,tone_slot=si%FX_SLOTS;
++    int32_t tone_v=shared_si?song.g[G_MFXTONE+tone_slot]:trk[si/FX_SLOTS-1u].p[P_FXTONE+tone_slot];
+     if(fx_has_tone(f->type)){   /* the low cut (section 0: the floor, TONE above 0 higher), TONE below 0 the high cut (1) */
+-        uint32_t slot=si%FX_SLOTS,div=f->type==FX_REVERB?1u:4u;
+-        int32_t tone=clamp(song.g[G_MFXTONE+slot],-FX_TONE_MAX,FX_TONE_MAX);
++        uint32_t div=f->type==FX_REVERB?1u:f->type==FX_DELAY?2u:4u;
++        int32_t tone=clamp(tone_v,-FX_TONE_MAX,FX_TONE_MAX);
+         for(uint32_t k=0;k<2u;k++){   /* (a2: the cutoff now, Hz; 0 off) */
+             int32_t hz=k?(tone<0?fx_tone_hz(tone):0):fx_low_cut_hz(f->type,tone);
+             fx_bq_t *q=&f->time_tone[k];
+@@ -461,17 +537,18 @@ static void fx_slot_prepare(fx_plan_t *plan,uint32_t si,const int16_t *p)
+     if(profiling){f->rate=(fx_profile_control>>12u)&127u;f->character=(fx_profile_control>>19u)&127u;}
+ #endif
+     int16_t *mem=0;
+-    if(f->type==FX_ROOM || f->type==FX_CHORUS || f->type==FX_REVERB || fx_sloop_type(f->type)){
+-        if(f->type==FX_REVERB)for(uint32_t k=0;k<FX_STATE_COUNT;k++)
+-            if(k!=si && fx_state[k].type==FX_REVERB && resource[RES_FX0+k].size)return;
+-        uint32_t bytes=f->type==FX_REVERB?sizeof(fx_sloop_reverb_t):fx_sloop_type(f->type)?fx_sloop_insert_bytes(f->type):2048u;
++    if(f->type==FX_DELAY)f->rev_span[0]=(uint16_t)fx_delay_len((uint32_t)f->rate);
++    if(f->type==FX_ROOM || f->type==FX_CHORUS || f->type==FX_REVERB || f->type==FX_DELAY || fx_sloop_type(f->type)){
++        if(fx_single(f->type))for(uint32_t k=0;k<FX_STATE_COUNT;k++)   /* (one tank: a second one stays silent) */
++            if(k!=si && fx_state[k].type==f->type && resource[RES_FX0+k].size)return;
++        uint32_t bytes=f->type==FX_REVERB?sizeof(fx_sloop_reverb_t):f->type==FX_DELAY?FX_DLY_BYTES:fx_sloop_type(f->type)?fx_sloop_insert_bytes(f->type):2048u;
+         if(!f->failed && !resource[RES_FX0+si].size){
+             void *(*volatile allocate)(uint32_t,uint32_t)=fx_memory;mem=allocate(RES_FX0+si,bytes);if(!mem)f->failed=1;
+         }else if(resource[RES_FX0+si].size)mem=resource[RES_FX0+si].ptr;
+         if(!mem){f->mix=0;return;}
+     }
+-    plan->shared=1u;
+-    plan->third=song.g[G_MFXTONE+si%FX_SLOTS];
++    plan->shared=(uint8_t)(shared_si && !((fx_master_use>>tone_slot)&1u));   /* (a MASTER slot runs as an insert) */
++    plan->third=(int16_t)tone_v;
+     plan->f=f;plan->mem=mem;plan->target=target;plan->active=1;
+ }
+ static __attribute__((noinline,section(".audio_text"))) int fx_slot_run(const fx_plan_t *plan,uint32_t n)
+@@ -483,6 +560,7 @@ static __attribute__((noinline,section(".audio_text"))) int fx_slot_run(const fx
+         fx_sloop_insert_run(f,(fx_sloop_insert_t *)mem,n,target,fx_left,fx_right,plan->third,plan->shared);
+     }
+     else if(f->type==FX_REVERB){fx_sloop_reverb_run(f,(fx_sloop_reverb_t *)mem,n,target,fx_left,fx_right);}
++    else if(f->type==FX_DELAY){void (*volatile run)(fx_state_t *,int16_t *,uint32_t,int32_t)=fx_delay;run(f,mem,n,target);}
+     else if(f->type==FX_CHORUS){
+         if(!n)return 1;
+         if(!f->age){f->rev_l=f->rev_r=256*65536;f->age=1;}
+@@ -506,6 +584,28 @@ static __attribute__((noinline,section(".audio_text"))) int fx_slot_run(const fx
+     }
+     return 1;
+ }
++static __attribute__((noinline,section(".audio_text"))) int fx_slot_values(uint32_t si,const int16_t *p,uint32_t n)
++{
++    fx_plan_t plan;void (*volatile prepare)(fx_plan_t *,uint32_t,const int16_t *)=fx_slot_prepare;prepare(&plan,si,p);
++    int (*volatile run)(const fx_plan_t *,uint32_t)=fx_slot_run;return run(&plan,n);
++}
++/* a track's three inserts in order (CHAIN): 0 none sounding (the mixer's dry path, bit for bit) */
++static __attribute__((noinline,section(".audio_text"))) int fx_process_impl(track_t *t,int32_t *b,uint32_t n)
++{
++    uint32_t ti=(uint32_t)(t-trk);
++    if(!fx_active(t)){
++        for(uint32_t slot=0;slot<FX_SLOTS;slot++){
++            uint32_t si=FX_TRACK_SI(ti,slot);
++            if(fx_state[si].type || resource[RES_FX0+si].size){resource[RES_FX0+si].size=0;fx_zero(&fx_state[si]);}
++        }
++        return 0;
++    }
++    void (*volatile pan)(track_t *,int32_t *,uint32_t)=fx_pan;pan(t,b,n);
++    int active=0;for(uint32_t slot=0;slot<FX_SLOTS;slot++)active|=fx_slot_values(FX_TRACK_SI(ti,slot),t->p+P_FXTYPE+slot*FX_PARAMS,n);
++    fx_post_pan(t,n);return active;
++}
++static inline int fx_process(track_t *t,int32_t *b,uint32_t n) { return fx_process_impl(t,b,n); }
++#define FX_HAS_TRACK_INSERTS 1   /* (tests/fx_kernel_fixture.h: fx_pan / fx_post_pan are these) */
+ /* Shared send/return: one chain or three independent post-fader buses. CPU0 and CPU1 never
+  * access this workspace concurrently; join before events or flash IO. */
+ static int32_t fx_send_l[CTL],fx_send_r[CTL];
+@@ -547,7 +647,7 @@ static void fx_bus_kernel(void *unused)
+     if(fx_bus_separate){
+         memset(fx_bus_sum_l,0,fx_bus_n*sizeof *fx_bus_sum_l);memset(fx_bus_sum_r,0,fx_bus_n*sizeof *fx_bus_sum_r);
+         for(uint32_t slot=0;slot<FX_SLOTS;slot++){
+-            if(!fx_bus_plan[slot].active){fx_bus_slot_mix[slot]=0;continue;}
++            if(!fx_bus_plan[slot].active || ((fx_master_use>>slot)&1u)){fx_bus_slot_mix[slot]=0;continue;}
+             const int32_t *l=slot?fx_send_extra_l[slot-1u]:fx_send_l,*r=slot?fx_send_extra_r[slot-1u]:fx_send_r;
+             memcpy(fx_left,l,fx_bus_n*sizeof *l);memcpy(fx_right,r,fx_bus_n*sizeof *r);
+             fx_bus_result|=fx_slot_run(&fx_bus_plan[slot],fx_bus_n);
+@@ -559,7 +659,7 @@ static void fx_bus_kernel(void *unused)
+             fx_bus_slot_mix[slot]=gain;
+         }
+         memcpy(fx_left,fx_bus_sum_l,fx_bus_n*sizeof *fx_left);memcpy(fx_right,fx_bus_sum_r,fx_bus_n*sizeof *fx_right);
+-    }else for(uint32_t slot=0;slot<FX_SLOTS;slot++)fx_bus_result|=fx_slot_run(&fx_bus_plan[slot],fx_bus_n);
++    }else for(uint32_t slot=0;slot<FX_SLOTS;slot++)if(!((fx_master_use>>slot)&1u))fx_bus_result|=fx_slot_run(&fx_bus_plan[slot],fx_bus_n);
+ #if MELODEE_AUDIO_PROFILE
+     fx_audio_ticks=AUDIO_PROFILE_TICKS()-audio_fx_start;fx_audio_ready=1;
+ #endif
+@@ -584,13 +684,14 @@ static void fx_bus_start(uint32_t n)
+ #endif
+     shared_fx_normalize(song.g);
+     fx_bus_select();
++    for(uint32_t slot=0;slot<FX_SLOTS;slot++)fx_bus_plan[slot].active=0;   /* (MASTER reads the plans after the join) */
+     fx_bus_result=fx_bus_pending=0;fx_bus_target=0;fx_bus_n=n;if(!fx_bus_active())return;
+     AP_START(audio_start);
+ #if defined(MELODEE_FX_PROFILE) && MELODEE_FX_PROFILE && defined(FM1_IRQ_TARGET)
+     uint32_t start=fm1_ticks();
+ #endif
+     for(uint32_t slot=0;slot<FX_SLOTS;slot++)fx_slot_prepare(&fx_bus_plan[slot],slot,song.g+G_MFXTYPE+slot*FX_PARAMS);
+-    for(uint32_t slot=0;slot<FX_SLOTS;slot++)if(fx_bus_plan[slot].active && fx_bus_plan[slot].target){
++    for(uint32_t slot=0;slot<FX_SLOTS;slot++)if(fx_bus_plan[slot].active && fx_bus_plan[slot].target && !((fx_master_use>>slot)&1u)){
+         int32_t amount=clamp(song.g[G_FXRETURN],0,127);fx_bus_target=(amount+(amount==127))*256;break;
+     }
+     if((song.g[G_FXMODE]!=0)!=fx_bus_separate)fx_bus_target=0;
+@@ -607,6 +708,18 @@ static void fx_bus_start(uint32_t n)
+ #endif
+     fx_bus_kernel(0);
+ }
++/* MASTER (a shared slot's USE): after the returns, before the punch FX and MASTER, the whole mix runs through each
++ * MASTER slot in order A .. C, its MIX the dry / wet. CPU0, after the join (the bus workspace is free) */
++static __attribute__((noinline,section(".audio_text"))) void fx_master_run(int32_t *l,int32_t *r,uint32_t n)
++{
++    if(!fx_master_use)return;
++    for(uint32_t slot=0;slot<FX_SLOTS;slot++){
++        if(!((fx_master_use>>slot)&1u) || !fx_bus_plan[slot].active)continue;
++        for(uint32_t i=0;i<n;i++){fx_left[i]=clamp(l[i],-131071,131071);fx_right[i]=clamp(r[i],-131071,131071);}
++        int (*volatile run)(const fx_plan_t *,uint32_t)=fx_slot_run;
++        if(run(&fx_bus_plan[slot],n))for(uint32_t i=0;i<n;i++){l[i]=fx_left[i];r[i]=fx_right[i];}
++    }
++}
+ static void fx_bus_join(void)
+ {
+ #if MELODEE_DUAL_CORE
+diff --git a/firmware/src/main.c b/firmware/src/main.c
+index 3fa7c14..6921cbe 100644
+--- a/firmware/src/main.c
++++ b/firmware/src/main.c
+@@ -177,6 +177,7 @@ static void melodee_init(void)
+     pattern_init();
+     for (i = 0; i < G_COUNT; i++)
+         song.g[i] = GP[i].def;
++    fx_master_use = 0;
+     undo_depth++;                             /* (no undo copy of the power-on loads) */
+     fm6_init();                               /* every track's FM6 patch: the init voice */
+     cz_init();
+diff --git a/firmware/src/mix.c b/firmware/src/mix.c
+index 1317870..9a088e7 100644
+--- a/firmware/src/mix.c
++++ b/firmware/src/mix.c
+@@ -230,6 +230,24 @@ static void mix_solo(track_t *t,int32_t *b,uint32_t n)
+     }
+     solo_gain[ti]=from;
+ }
++/* a track through its inserts (fx_left / fx_right, positioned): its level, mute / solo, SEND and USB stem, as the dry
++ * path's (restored, Melodee 1.3's) */
++static __attribute__((noinline,section(".audio_text"))) void mix_fx_samples(track_t *t,uint32_t n)
++{
++    uint32_t ti=(uint32_t)(t-trk);int32_t lvl=LEVEL_Q12[t->p[P_LEVEL]&127],pk=t->peak;
++    uint32_t send=fx_send_on?fx_send_gain(t):0u;
++    int32_t gain=solo_gain[ti],to=!t->p[P_MUTE] && (!track_solo || ((track_solo>>ti)&1u))?32768:0;
++    for(uint32_t i=0;i<n;i++){
++        gain+=clamp(to-gain,-256,256);
++        int32_t l=fx_scale(fx_left[i],(uint32_t)gain*2u),r=fx_scale(fx_right[i],(uint32_t)gain*2u);
++        l=clamp(fx_div_pow2((l>>2)*lvl,10),-524287,524287);r=clamp(fx_div_pow2((r>>2)*lvl,10),-524287,524287);
++        mix_add(l,r,i,send);int32_t a=l<0?-l:l,c=r<0?-r:r;if(c>a)a=c;if(a>pk)pk=a;
++#if MELODEE_USB_AUDIO
++        if(track_capture_on)track_capture[i*NPART+ti]=fx_div_pow2(l+r,1);
++#endif
++    }
++    solo_gain[ti]=gain;t->peak=pk;
++}
+ #if MELODEE_BATCH_AUDIO && !MELODEE_LEGACY_EXTRAS
+ static int32_t batch_pcm[NPART][CTL],batch_spread[NPART][CTL];
+ static uint32_t batch_rendered[NPART];static uint8_t batch_spread_on[NPART],batch_ready;
+@@ -265,7 +283,16 @@ static __attribute__((noinline)) void mix_prepare_batch(uint32_t n,uint32_t nt)
+ #endif
+ static __attribute__((noinline)) void mix_part(track_t *t,uint32_t n)
+ {
+-    if(t->engine==ENGI_MIDI){t->peak=0;return;}
++    if (midi_track_only(t)) {                           /* (a MIDI Track: its inserts hold nothing) */
++        uint32_t ti = (uint32_t)(t - trk);
++        for (uint32_t slot = 0; ti < NPART && slot < FX_SLOTS; slot++) {
++            uint32_t si = FX_TRACK_SI(ti, slot);
++            if (fx_state[si].type || resource[RES_FX0 + si].size) {
++                resource_release(RES_FX0 + si); fx_zero(&fx_state[si]);
++            }
++        }
++        if (t->engine == ENGI_MIDI) { t->peak = 0; return; }
++    }
+     uint32_t extra=0;
+     if(fx_send_on && fx_bus_separate)for(uint32_t slot=0;slot<FX_SLOTS-1u;slot++){
+         uint32_t amount=(uint32_t)t->p[P_FXSEND2+slot];fx_extra_gain[slot]=(amount+(amount==127u))*512u;extra|=amount;
+@@ -301,14 +328,31 @@ static __attribute__((noinline)) void mix_part(track_t *t,uint32_t n)
+     if(fx_profile_control>>30u && fx_profile_track((uint32_t)(t-trk))){for(uint32_t i=0;i<n;i++)part_buf[i]=((i&8u)?-8000:8000)+(int32_t)i*97;rendered=1;spread_on=0;}
+ #endif
+     AP_START(mix_start);
+-    if(rendered){
+-        mix_solo(t,part_buf,n);
+-        if(spread_on)mix_spread(t,part_buf,n);
+-        else{
+-            mix_cache_t *mc=&mix_cache[(uint32_t)(t-trk)];
+-            if(!mc->valid || mc->level!=t->p[P_LEVEL] || mc->pan!=t->p[P_PAN])mix_cache_update(t,mc);
+-            void (*volatile mix)(track_t *,int32_t *,uint32_t,const mix_cache_t *)=mix_mono_samples;
+-            mix(t,part_buf,n,mc);
++    int inserts=fx_active(t);
++    if(!inserts){                                       /* (inserts off: their states and tanks given back) */
++        uint32_t ti=(uint32_t)(t-trk);
++        for(uint32_t slot=0;ti<NPART && slot<FX_SLOTS;slot++){
++            uint32_t si=FX_TRACK_SI(ti,slot);
++            if(fx_state[si].type || resource[RES_FX0+si].size){resource[RES_FX0+si].size=0;fx_zero(&fx_state[si]);}
++        }
++    }
++    if(rendered || inserts){                            /* (inserts: a silent track's tails go on too) */
++        int wet=0;
++        if(inserts){
++            if(!rendered){memset(part_buf,0,n*sizeof *part_buf);if(spread_on)memset(spread_buf,0,n*sizeof *spread_buf);}
++            AP_START(fx_start);wet=fx_process(t,part_buf,n);AP_END(AP_FX,fx_start);
++        }
++        if(wet){
++            void (*volatile run)(track_t *,uint32_t)=mix_fx_samples;run(t,n);
++        }else{
++            mix_solo(t,part_buf,n);
++            if(spread_on)mix_spread(t,part_buf,n);
++            else{
++                mix_cache_t *mc=&mix_cache[(uint32_t)(t-trk)];
++                if(!mc->valid || mc->level!=t->p[P_LEVEL] || mc->pan!=t->p[P_PAN])mix_cache_update(t,mc);
++                void (*volatile mix)(track_t *,int32_t *,uint32_t,const mix_cache_t *)=mix_mono_samples;
++                mix(t,part_buf,n,mc);
++            }
+         }
+     }
+     AP_END(AP_MIX,mix_start);
+@@ -330,6 +374,7 @@ static __attribute__((noinline,section(".dsp_text"))) void master_samples(int32_
+             r+=fx_scale(fx_right[i],ret);}
+         mix_l[i]=l;mix_r[i]=r;
+     }
++    {void (*volatile master)(int32_t *,int32_t *,uint32_t)=fx_master_run;master(mix_l,mix_r,n);}   /* (MASTER slots) */
+     punch_process(mix_l,mix_r,n);
+     /* Attenuate the finished output: punch history, freeze and the DC blocker
+      * keep running at unity, so even an already sounding tail follows MASTER. */
+diff --git a/firmware/src/params.c b/firmware/src/params.c
+index c27c073..75e9919 100644
+--- a/firmware/src/params.c
++++ b/firmware/src/params.c
+@@ -11,15 +11,23 @@ static const char *const N_RECQ[] = {"OFF", "1/4", "1/8", "1/16", "1/32", "8T",
+ static const char *const N_LTRIG[] = {"NOTE", "FREE"};
+ static const char *const N_LPOL[] = {"BI", "UNI"};
+ /* SOFT .. FUZZ are one DRIVE, their SHAPE on KNOB 4 (N_SHAPE) */
+-static const char *const N_FX[] = {"OFF", "PHASER", "WIDTH", "FORMANT", "TAPE", "SPIT", "", "ROOM", "REVERB", "CHORUS", "NOTE TAIL", "NOTE ECHO", "DRIVE", "DRIVE", "DRIVE", "DRIVE", "CRUSH", "FLANGER", "PEDAL PHASER", "PEDAL CHORUS"};
+-static const char *const N_NOTE_FX[FX_COUNT] = {"OFF", "", "", "", "", "", "", "", "", "", "NOTE TAIL", "NOTE ECHO", "", "", "", "", "", "", "", ""};
+-static const char *const N_AUDIO_FX[] = {"OFF", "PHASER", "WIDTH", "FORMANT", "TAPE", "SPIT", "", "ROOM", "REVERB", "CHORUS", "", "", "DRIVE", "DRIVE", "DRIVE", "DRIVE", "CRUSH", "FLANGER", "PEDAL PHASER", "PEDAL CHORUS"};
++static const char *const N_FX[FX_COUNT] = {"OFF", "PHASER", "WIDTH", "FORMANT", "TAPE", "SPIT", "", "ROOM", "REVERB", "CHORUS", "NOTE TAIL", "NOTE ECHO", "DRIVE", "DRIVE", "DRIVE", "DRIVE", "CRUSH", "FLANGER", "PEDAL PHASER", "PEDAL CHORUS", "DELAY"};
++static const char *const N_NOTE_FX[FX_COUNT] = {"OFF", "", "", "", "", "", "", "", "", "", "NOTE TAIL", "NOTE ECHO", "", "", "", "", "", "", "", "", ""};
++static const char *const N_AUDIO_FX[FX_COUNT] = {"OFF", "PHASER", "WIDTH", "FORMANT", "TAPE", "SPIT", "", "ROOM", "REVERB", "CHORUS", "", "", "DRIVE", "DRIVE", "DRIVE", "DRIVE", "CRUSH", "FLANGER", "PEDAL PHASER", "PEDAL CHORUS", "DELAY"};
++/* DELAY's TIME (its RATE): the divisions of fx.c FX_DLY_UNITS */
++static const char *const N_DLY_DIV[FX_DLY_DIVS] = {"1/32", "1/16T", "1/16", "1/8T", "1/16D", "1/8", "1/4T", "1/8D", "1/4", "1/2T", "1/4D", "1/2"};
++/* a shared slot's USE (the shared rack's KNOB 3): SEND, or MASTER (the whole mix through it) */
++static const char *const N_FX_USE[] = {"SEND", "MASTER"};
++static const param_desc_t FX_USE_DESC = {"USE", F_ENUM, 0, 1, 0, N_FX_USE, 0};
++/* a track slot's ORDER (the track's rack, KNOB 3): its place in the chain; a turn moves its effect there */
++static const char *const N_FX_ORDER[] = {"1st", "2nd", "3rd"};
++static const param_desc_t FX_ORDER_DESC = {"ORDER", F_ENUM, 0, FX_SLOTS - 1, 0, N_FX_ORDER, 0};
+ static const char *const N_SHAPE[FX_FUZZ + 1u] = {[FX_SOFT] = "SOFT", [FX_HARD] = "HARD", [FX_FOLD] = "FOLD", [FX_FUZZ] = "FUZZ"};
+ /* the effects as the picker and the list give them (README "FX rack"), in families: Space, Motion, Dirt, Colour,
+  * Notes (the track's racks only: the last two); DRIVE stands for SOFT .. FUZZ. The stored IDs keep their numbers */
+-static const uint8_t FX_ORDER[] = {FX_OFF, FX_ROOM, FX_REVERB, FX_WIDTH, FX_PHASER, FX_CHORUS, FX_FLANGER, FX_PEDAL_PHASER,
++static const uint8_t FX_ORDER[] = {FX_OFF, FX_ROOM, FX_REVERB, FX_DELAY, FX_WIDTH, FX_PHASER, FX_CHORUS, FX_FLANGER, FX_PEDAL_PHASER,
+                                    FX_PEDAL_CHORUS, FX_SOFT, FX_CRUSH, FX_FORMANT, FX_TAPE, FX_SPIT, FX_MIDIDELAY, FX_MIDIVERB};
+-static const uint8_t FX_FAM_FIRST[] = {0, 1, 4, 9, 11, 14, 16};   /* each family's first place in FX_ORDER */
++static const uint8_t FX_FAM_FIRST[] = {0, 1, 5, 10, 12, 15, 17};   /* each family's first place in FX_ORDER */
+ static const char *const FX_FAM_NAME[] = {"Off", "Space", "Motion", "Dirt", "Colour", "Notes"};
+ enum { FXF_OFF, FXF_SPACE, FXF_MOTION, FXF_DIRT, FXF_COLOUR, FXF_NOTES };
+ static int fx_names(const param_desc_t *d) { return d->names == N_FX || d->names == N_AUDIO_FX; }
+@@ -89,8 +97,20 @@ static int16_t drumch_cell;
+ static uint8_t settings_boot;
+ static int16_t settings_budget = VOICE_BUDGET_DEFAULT;
+ /* GLO > WEIGHTS: budget points per sounding voice of PROPHET, CZ-1, FM6, SID and DRUM (0 AUTO: voice.c's
+- * built-in rule) and SAFETY (0: overload never cuts voices, audio.c). Device settings (settings_persist.c). */
+-#define VOICE_KINDS 5u
++ * built-in rule) and SAFETY (0: overload never cuts voices, audio.c). Device settings (settings_persist.c).
++ * MELODEE_FELUCCA_ENGINES: PROPHET, FM6, DRUM, PHASE, LOFI, VOICE, TRIO, WHEEL and PHYS (voice.c voice_kind) */
++#define VOICE_KINDS (MELODEE_FELUCCA_ENGINES ? 9u : 5u)
++/* a WEIGHTS page id's kind (settings_vpoints index), -1 none (GUARD: G_SAFETY) */
++static int weight_kind(uint32_t id)
++{
++#if MELODEE_FELUCCA_ENGINES
++    static const uint8_t ids[9] = {G_WP5, G_WFM6, G_WDRUM, G_WPHASE, G_WLOFI, G_WVOICE, G_WTRIO, G_WWHEEL, G_WPHYS};
++    for (int k = 0; k < 9; k++) if (ids[k] == id) return k;
++    return -1;
++#else
++    return id >= G_WP5 && id <= G_WDRUM ? (int)(id - G_WP5) : -1;
++#endif
++}
+ static int16_t settings_vpoints[VOICE_KINDS];
+ static int16_t settings_safety;
+ /* Device recording preferences: defaults preserve existing behavior. */
+@@ -180,13 +200,13 @@ static void fm6_freq_text(char *val, const char **unit, int coarse)
+ }
+ 
+ static const param_desc_t TP[P_COUNT] = {
+-    [P_FXTYPE] = PE("NOTE FX", N_NOTE_FX, 0),
++    [P_FXTYPE] = PE("FX", N_FX, 0),
+     [P_FXMIX] = PD("MIX", F_PCT, 0, 127, 0),
+     [P_FXRATE] = PD("RATE", F_LFOHZ, 0, 127, 60),
+     [P_FXCHAR] = PD("CHAR", F_PCT, 0, 127, 64),
+-    [P_FX2TYPE] = PE("NOTE FX", N_NOTE_FX, 0), [P_FX2MIX] = PD("MIX", F_PCT, 0, 127, 0),
++    [P_FX2TYPE] = PE("FX", N_FX, 0), [P_FX2MIX] = PD("MIX", F_PCT, 0, 127, 0),
+     [P_FX2RATE] = PD("RATE", F_LFOHZ, 0, 127, 60), [P_FX2CHAR] = PD("CHAR", F_PCT, 0, 127, 64),
+-    [P_FX3TYPE] = PE("NOTE FX", N_NOTE_FX, 0), [P_FX3MIX] = PD("MIX", F_PCT, 0, 127, 0),
++    [P_FX3TYPE] = PE("FX", N_FX, 0), [P_FX3MIX] = PD("MIX", F_PCT, 0, 127, 0),
+     [P_FX3RATE] = PD("RATE", F_LFOHZ, 0, 127, 60), [P_FX3CHAR] = PD("CHAR", F_PCT, 0, 127, 64),
+     [P_LN0] = PD("KICK", F_PCT, 0, 127, 127),
+     [P_LN1] = PD("SNARE", F_PCT, 0, 127, 127),
+@@ -341,10 +361,11 @@ static const param_desc_t *global_desc(uint32_t id)
+ {
+     if(id>=G_MFXTONE && id<=G_MFX3TONE){uint32_t type=song.g[G_MFXTYPE+(id-G_MFXTONE)*FX_PARAMS];if(fx_sloop_swept(type))return fx_pedal_desc(type,4,&GP[id]);}
+     if(param_master_fx(id) && (id-G_MFXTYPE)%FX_PARAMS>=2u){
+-        static param_desc_t d;static const char *const character[]={"CHAR","DEPTH","DEPTH","FOCUS","JITTER","BITE","REPEAT","DECAY","DAMP","DEPTH","","","TONE","TONE","TONE","TONE","ALIAS","DEPTH","DEPTH","DEPTH"};
++        static param_desc_t d;static const char *const character[FX_COUNT]={"CHAR","DEPTH","DEPTH","FOCUS","JITTER","BITE","REPEAT","DECAY","DAMP","DEPTH","","","TONE","TONE","TONE","TONE","ALIAS","DEPTH","DEPTH","DEPTH","FDBK"};
+         uint32_t base=G_MFXTYPE+(id-G_MFXTYPE)/FX_PARAMS*FX_PARAMS,type=(uint32_t)clamp(song.g[base],0,NELEM(N_AUDIO_FX)-1);d=GP[id];
+         if(fx_sloop_type(type))return fx_pedal_desc(type,id-base,&GP[id]);
+         if(id-base==3u)d.label=character[type];else if(type>=6u && type<=8u){d.label=type==6u?"TIME":"SIZE";d.fmt=F_PCT;}
++        else if(type==FX_DELAY){d.label="TIME";d.fmt=F_ENUM;d.names=N_DLY_DIV;d.max=FX_DLY_DIVS-1u;}
+         return &d;
+     }
+     return &GP[id];
+@@ -372,12 +393,13 @@ static const param_desc_t *track_desc(const track_t *t, uint32_t id)
+     }
+     if (param_fx(id) && !param_fx_tone(id) && ((id-P_FXTYPE)%FX_PARAMS)>=2u) {
+         static param_desc_t fx_desc;
+-        static const char *const character[] = {"CHAR", "DEPTH", "DEPTH", "FOCUS", "JITTER", "BITE", "REPEAT", "DECAY", "DAMP", "DEPTH", "", "", "TONE", "TONE", "TONE", "TONE", "ALIAS", "DEPTH", "DEPTH", "DEPTH"};
++        static const char *const character[FX_COUNT] = {"CHAR", "DEPTH", "DEPTH", "FOCUS", "JITTER", "BITE", "REPEAT", "DECAY", "DAMP", "DEPTH", "", "", "TONE", "TONE", "TONE", "TONE", "ALIAS", "DEPTH", "DEPTH", "DEPTH", "FDBK"};
+         uint32_t base=P_FXTYPE+(id-P_FXTYPE)/FX_PARAMS*FX_PARAMS;
+         fx_desc=TP[id];uint32_t type=(uint32_t)clamp(t->p[base],0,NELEM(N_FX)-1);
+         if(fx_sloop_type(type))return fx_pedal_desc(type,id-base,&TP[id]);
+         if(id-base==3u)fx_desc.label=character[type];
+         else if(type>=6u && type<=8u){fx_desc.label=type==6u?"TIME":"SIZE";fx_desc.fmt=F_PCT;}
++        else if(type==FX_DELAY){fx_desc.label="TIME";fx_desc.fmt=F_ENUM;fx_desc.names=N_DLY_DIV;fx_desc.max=FX_DLY_DIVS-1u;}
+         return &fx_desc;
+     }
+     if (t->eng_req == 2u && id >= P_FM1_ATK && id <= P_FM4_LEVEL)
+@@ -701,8 +723,14 @@ static const page_t PAGES[] = {
+     {"VOICE 3", FAM_EDIT, SC_TRACK, GR_NONE, {P_SPRD, 0xFF, 0xFF, 0xFF}},
+     {"GLOBAL", FAM_GLO, SC_GLOBAL, GR_NONE, {G_A4, G_BUDGET, G_CLOCK, G_TUNE}}, /* device reference/budget; CLK/TUNE kept */
+     {"SYSTEM", FAM_GLO, SC_GLOBAL, GR_NONE, {G_MIDI, G_DRUMCH, G_ROUTE, G_INFO}},
++#if MELODEE_FELUCCA_ENGINES
++    {"WEIGHTS", FAM_GLO, SC_GLOBAL, GR_NONE, {G_WP5, G_WFM6, G_WDRUM, G_WPHASE}},   /* budget points per voice */
++    {"WEIGHTS 2", FAM_GLO, SC_GLOBAL, GR_NONE, {G_WLOFI, G_WVOICE, G_WTRIO, G_WWHEEL}},
++    {"WEIGHTS 3", FAM_GLO, SC_GLOBAL, GR_NONE, {G_WPHYS, G_BUDGET, 0xFF, G_SAFETY}},  /* SAFETY: overload voice cuts */
++#else
+     {"WEIGHTS", FAM_GLO, SC_GLOBAL, GR_NONE, {G_WP5, G_WCZ, G_WFM6, G_WSID}},        /* budget points per voice */
+     {"WEIGHTS 2", FAM_GLO, SC_GLOBAL, GR_NONE, {G_WDRUM, G_BUDGET, 0xFF, G_SAFETY}},  /* SAFETY: overload voice cuts */
++#endif
+     {"PRESETS", FAM_SAVE, SC_GLOBAL, GR_BROWSE, {0xFF, 0xFF, 0xFF, 0xFF}},   /* browser: KNOB 1 LIST, 2 / PRESETS the sounds */
+     {"USER", FAM_SAVE, SC_GLOBAL, GR_USER, {0xFF, 0xFF, 0xFF, 0xFF}},       /* user presets: SLOT LOAD ERASE SAVE */
+     {"PROJECT", FAM_SAVE, SC_GLOBAL, GR_SLOTS, {G_SLOT, G_BOOT, G_LOAD, G_SAVE}},
+@@ -798,7 +826,19 @@ static const param_desc_t *fx_rack_desc(const page_t *pg, uint32_t slot, int16_t
+         type.label = "FX";
+         return &type;
+     }
+-    if (slot == 2u && shared) {                         /* SHARED's KNOB 3: the routing, CHAIN or SPLIT (its sheet too) */
++    if (slot == 2u && !shared && r < FX_SLOTS) {        /* FX's KNOB 3: the slot's ORDER (ui_input.c moves its effect) */
++        static int16_t place;
++        place = (int16_t)r;
++        *valp = &place;
++        return &FX_ORDER_DESC;
++    }
++    if (slot == 2u && shared && r < FX_SLOTS) {         /* SHARED's KNOB 3 on a slot: its USE, SEND or MASTER */
++        static int16_t use;
++        use = (int16_t)((fx_master_use >> r) & 1u);
++        *valp = &use;
++        return &FX_USE_DESC;
++    }
++    if (slot == 2u && shared) {                         /* SHARED's KNOB 3 on RETURN: the routing, CHAIN or SPLIT (its sheet too) */
+         static param_desc_t route;
+         *valp = &song.g[G_FXMODE];
+         route = *global_desc(G_FXMODE);
+@@ -811,7 +851,7 @@ static const param_desc_t *fx_rack_desc(const page_t *pg, uint32_t slot, int16_t
+         *valp = &song.g[G_FXRETURN];
+         return global_desc(G_FXRETURN);
+     }
+-    if (shared && !song.g[G_FXMODE]) {
++    if (shared && (!song.g[G_FXMODE] || ((fx_master_use >> r) & 1u))) {   /* (a MASTER slot: its MIX, any ROUTE) */
+         *valp = &song.g[G_MFXMIX + r * FX_PARAMS];
+         return global_desc(G_MFXMIX + r * FX_PARAMS);
+     }
+@@ -872,11 +912,19 @@ static const param_desc_t *page_desc(const page_t *pg, uint32_t slot, int16_t **
+         *valp = &TSEL->p[P_RECQ];
+         return track_desc(TSEL, P_RECQ);
+     }
+-    if (pg->scope == SC_GLOBAL && id >= G_WP5 && id <= G_SAFETY) {   /* GLO > WEIGHTS: the device's settings */
++    if (pg->scope == SC_GLOBAL && (weight_kind(id) >= 0 || id == G_SAFETY)) {   /* GLO > WEIGHTS: the device's settings */
++#if MELODEE_FELUCCA_ENGINES
++        static const param_desc_t weights[] = {PE("P5", N_VPOINTS, 0), PE("FM6", N_VPOINTS, 0), PE("DRUM", N_VPOINTS, 0),
++            PE("PHASE", N_VPOINTS, 0), PE("LOFI", N_VPOINTS, 0), PE("VOICE", N_VPOINTS, 0), PE("TRIO", N_VPOINTS, 0),
++            PE("WHEEL", N_VPOINTS, 0), PE("PHYS", N_VPOINTS, 0)};
++#else
+         static const param_desc_t weights[] = {PE("P5", N_VPOINTS, 0), PE("CZ-1", N_VPOINTS, 0), PE("FM6", N_VPOINTS, 0),
+-            PE("SID", N_VPOINTS, 0), PE("DRUM", N_VPOINTS, 0), PE("GUARD", N_ONOFF, 0)};
+-        *valp = id == G_SAFETY ? &settings_safety : &settings_vpoints[id - G_WP5];
+-        return &weights[id - G_WP5];
++            PE("SID", N_VPOINTS, 0), PE("DRUM", N_VPOINTS, 0)};
++#endif
++        static const param_desc_t guard = PE("GUARD", N_ONOFF, 0);
++        int k = weight_kind(id);
++        *valp = id == G_SAFETY ? &settings_safety : &settings_vpoints[k];
++        return id == G_SAFETY ? &guard : &weights[k];
+     }
+     if (pg->scope == SC_GLOBAL && id == G_BOOT) {
+         boot_cell = settings_boot;                       /* (a copy: ui_input.c edit_param writes it back) */
+diff --git a/firmware/src/project.c b/firmware/src/project.c
+index fff1659..a681b2d 100644
+--- a/firmware/src/project.c
++++ b/firmware/src/project.c
+@@ -317,7 +317,7 @@ static int proj_pack(project_store_t *out, const project_t *q)
+     if (q->g[G_FXRETURN]<0 || q->g[G_FXRETURN]>127 || q->g[G_FXMODE]<0 || q->g[G_FXMODE]>1 || !chain_legacy_valid(&q->chain) || !motion_valid(&q->motion) || P_COUNT > 127u) return 0;
+     memset(out, 0, sizeof *out); memcpy(b, &magic, 4); memcpy(b + 4, &size, 4);
+     memcpy(b + 8, q->g, 2u*PROJ_GLOBALS);
+-    b[PROJ_FX_MODE_OFF]=(uint8_t)q->g[G_FXMODE];b[PROJ_FX_MODE_OFF+1u]=0;
++    b[PROJ_FX_MODE_OFF]=(uint8_t)q->g[G_FXMODE];b[PROJ_FX_MODE_OFF+1u]=(uint8_t)(q->g[G_RESERVED24]&7);   /* (USE MASTER bits) */
+     b[PROJ_FX_WIRE_OFF]='M';b[PROJ_FX_WIRE_OFF+1u]='F';b[PROJ_FX_WIRE_OFF+2u]='X';b[PROJ_FX_WIRE_OFF+3u]=(uint8_t)q->g[G_FXRETURN];
+     for(i=0;i<FX_SLOTS*FX_PARAMS;i++){uint32_t id=G_MFXTYPE+i;if(q->g[id]<GP[id].min || q->g[id]>GP[id].max)return 0;b[PROJ_MASTER_WIRE+i]=(uint8_t)q->g[id];} b[62] = q->sel; b[63] = q->parts; b[64] = q->phys; b[66] = P_COUNT;
+     for(i=0;i<FX_SLOTS;i++){int32_t v=q->g[G_MFXTONE+i];if(v<-FX_TONE_MAX || v>FX_TONE_MAX)return 0;b[PROJ_TONE_WIRE+i]=(uint8_t)(v+64);}
+@@ -397,13 +397,14 @@ static int proj_unpack(project_t *q, const uint8_t *b)
+         for(i=0;i<FX_SLOTS*FX_PARAMS;i++){uint32_t id=G_MFXTYPE+i;uint8_t v=b[PROJ_MASTER_WIRE+i];if(v>GP[id].max)return 0;q->g[id]=(i%FX_PARAMS==0u && fx_retired(v))?FX_OFF:v;}
+         for(i=G_RESERVED4;i<=G_RESERVED11;i++)q->g[i]=0;
+     }
+-    if(magic==PROJ_MAGIC || magic==PROJ_CUT_MAGIC || magic==PROJ_PRE_HP_MAGIC){if(b[PROJ_FX_MODE_OFF]>1u || b[PROJ_FX_MODE_OFF+1u])return 0;q->g[G_FXMODE]=b[PROJ_FX_MODE_OFF];}
++    uint8_t master_use=0;                               /* (b[PROJ_FX_MODE_OFF + 1]: the shared slots' USE MASTER bits) */
++    if(magic==PROJ_MAGIC || magic==PROJ_CUT_MAGIC || magic==PROJ_PRE_HP_MAGIC){if(b[PROJ_FX_MODE_OFF]>1u || b[PROJ_FX_MODE_OFF+1u]>7u)return 0;q->g[G_FXMODE]=b[PROJ_FX_MODE_OFF];master_use=b[PROJ_FX_MODE_OFF+1u];}
+     for(i=0;i<FX_SLOTS && (magic==PROJ_MAGIC || magic==PROJ_CUT_MAGIC);i++){
+         uint32_t lo=b[PROJ_TONE_WIRE+i],hi=b[PROJ_LP_WIRE+i];
+         if(magic==PROJ_MAGIC ? lo<64u-FX_TONE_MAX || lo>64u+FX_TONE_MAX || hi : lo>127u || hi>127u)return 0;
+         q->g[G_MFXTONE+i]=magic==PROJ_MAGIC?(int16_t)((int32_t)lo-64):proj_tone_of_cuts((int32_t)lo,(int32_t)hi);
+     }
+-    q->g[G_RESERVED24]=0;
++    q->g[G_RESERVED24]=master_use;
+     if(magic==0x46554E44u)for(i=G_RESERVED4;i<=G_RESERVED11;i++)q->g[i]=0;
+     q->sel = b[62]; q->parts = b[63]; q->phys = b[64];
+     {
+@@ -700,6 +701,7 @@ static void project_capture(project_t *p)
+     p->size = sizeof *p;
+     for (i = 0; i < G_COUNT; i++)
+         p->g[i] = song.g[i];
++    p->g[G_RESERVED24] = fx_master_use & 7u;            /* (the shared slots' USE MASTER: saved beside the FX mode) */
+     p->sel = song.sel;
+     p->parts = (uint8_t)cap_tracks();
+     p->phys = PROJ_PHYS;
+@@ -931,6 +933,7 @@ static int project_restore_runtime(const project_t *input)
+     project_t *p = &proj_scratch;
+     uint32_t i, k;
+     if (!proj_ok(input)) return 1;
++    fx_master_use = (uint8_t)(input->g[G_RESERVED24] & 7);   /* (before the reserved globals are cleared) */
+     if(designer_on() && designer_quit)designer_quit(0);   /* a loaded project owns the new sound */
+     if (p != input) memcpy(p, input, sizeof *p);
+     transport_req = 2;
+@@ -1211,7 +1214,7 @@ static void template_save(void)
+         tmpl.g[i] = song.g[i];
+     for(i=0;i<FX_SLOTS*FX_PARAMS;i++)tmpl.master[i]=(uint8_t)song.g[G_MFXTYPE+i];
+     tmpl.master[12]=(uint8_t)song.g[G_FXRETURN];
+-    tmpl.master[13]=(uint8_t)song.g[G_FXMODE];
++    tmpl.master[13]=(uint8_t)((song.g[G_FXMODE]&1)|(fx_master_use&7u)<<1);   /* (MODE, USE MASTER bits 1..3) */
+     for(i=0;i<FX_SLOTS;i++)tmpl.master[14u+i]=(uint8_t)(clamp(song.g[G_MFXTONE+i],-FX_TONE_MAX,FX_TONE_MAX)+64);
+     int8_t oct[PROJ_TRK];
+     for(k=0;k<PROJ_TRK;k++)oct[k]=trk[k].mpc_octave;
+@@ -1270,7 +1273,8 @@ static void template_load(void)
+         p->g[i] = tmpl.g[i];
+     for(i=0;i<FX_SLOTS*FX_PARAMS;i++)p->g[G_MFXTYPE+i]=tmpl.master[i];
+     p->g[G_FXRETURN]=tmpl.master[12];
+-    p->g[G_FXMODE]=tmpl.master[13];
++    p->g[G_FXMODE]=tmpl.master[13]&1u;
++    p->g[G_RESERVED24]=(int16_t)((tmpl.master[13]>>1)&7u);
+     for(i=0;i<FX_SLOTS;i++)p->g[G_MFXTONE+i]=(int16_t)(tmpl.master[14u+i]-64);
+     p->sel = tmpl.sel;
+     p->parts = tmpl.ntrk ? tmpl.ntrk : NPART;
+@@ -1331,6 +1335,7 @@ static void project_new_blank(void)
+     fm1_irq_on();
+     for (i = 0; i < G_COUNT; i++)
+         song.g[i] = GP[i].def;
++    fx_master_use = 0;
+     for (k = 0; k < 4u; k++)
+         song.g[GLO_KEPT[k]] = kept[k];
+     undo_depth++;
+diff --git a/firmware/src/settings_persist.c b/firmware/src/settings_persist.c
+index b596190..407554f 100644
+--- a/firmware/src/settings_persist.c
++++ b/firmware/src/settings_persist.c
+@@ -34,7 +34,8 @@ static int16_t settings_glo[4];                     /* ext.glo: project.c GLO_KE
+ #endif
+ #define AUTOSAVE_OFF_TAG 0xA1u                     /* CZ row byte 28: only this tag disables autosave */
+ #define WORK_BUDGET_TAG 0x57420000u /* WB: high bits of usb_off; low two bits retain USB mode */
+-/* GLO > WEIGHTS in favorites.c row 8 bytes 8..15: 'W', version 1, the five points (0 AUTO, 1..15), bit 0 of the
++/* GLO > WEIGHTS in favorites.c row 8 bytes 8..15: 'W', version 1, the five points (0 AUTO, 1..15) (version 2, the shipping
++ * engines: nine points, a nibble each, in bytes 2..6), bit 0 of the
+  * last byte SAFETY OFF. Untagged bytes default to OFF; explicit ON is tagged too. Defaults store zeros. */
+ #define VOICE_PREF_ROW 8u
+ #define VOICE_PREF_BYTE 8u
+@@ -136,10 +137,22 @@ static int settings_import(persist_t *p, int n)
+     panel = p->panel.magic == PANEL_MAGIC ? p->panel : PANEL_DEFAULT;
+     {
+         const uint8_t *w = p->favorites.factory[VOICE_PREF_ROW] + VOICE_PREF_BYTE;
+-        uint32_t tagged = w[0] == 'W' && w[1] == 1u;
++        uint32_t tagged = w[0] == 'W' && w[1] == 1u, nib = w[0] == 'W' && w[1] == 2u;
++#if MELODEE_FELUCCA_ENGINES
++        /* version 2: nine points as nibbles in bytes 2..6 (P5 FM6 DRUM PHASE LOFI VOICE TRIO WHEEL PHYS); a version 1
++         * record (P5 CZ-1 FM6 SID DRUM bytes) keeps its P5, FM6 and DRUM */
++        static const uint8_t from_v1[3][2] = {{0, 0}, {1, 2}, {2, 4}};
++        for (uint32_t k = 0; k < VOICE_KINDS; k++)
++            settings_vpoints[k] = (int16_t)(nib ? (w[2u + k / 2u] >> (k & 1u ? 4u : 0u)) & 15u : 0u);
++        if (tagged)
++            for (uint32_t j = 0; j < 3u; j++) settings_vpoints[from_v1[j][0]] = (int16_t)(w[2u + from_v1[j][1]] <= 15u ? w[2u + from_v1[j][1]] : 0u);
++        settings_safety = (int16_t)((tagged || nib) && !(w[7] & 1u));
++#else
++        (void)nib;
+         for (uint32_t k = 0; k < VOICE_KINDS; k++)
+             settings_vpoints[k] = (int16_t)(tagged && w[2u + k] <= 15u ? w[2u + k] : 0u);
+         settings_safety = (int16_t)(tagged && !(w[7] & 1u));
++#endif
+     }
+     return 1;
+ }
+@@ -201,9 +214,15 @@ static void settings_export(persist_t *p)
+             custom |= settings_vpoints[k] != 0;
+         memset(w, 0, 8);
+         if (custom) {
++#if MELODEE_FELUCCA_ENGINES
++            w[0] = 'W'; w[1] = 2u; w[7] = (uint8_t)!settings_safety;
++            for (uint32_t k = 0; k < VOICE_KINDS; k++)
++                w[2u + k / 2u] |= (uint8_t)((settings_vpoints[k] & 15) << (k & 1u ? 4u : 0u));
++#else
+             w[0] = 'W'; w[1] = 1u; w[7] = (uint8_t)!settings_safety;
+             for (uint32_t k = 0; k < VOICE_KINDS; k++)
+                 w[2u + k] = (uint8_t)settings_vpoints[k];
++#endif
+         }
+     }
+ }
+diff --git a/firmware/src/ui_input.c b/firmware/src/ui_input.c
+index 6aa7804..d7ebe92 100644
+--- a/firmware/src/ui_input.c
++++ b/firmware/src/ui_input.c
+@@ -1030,6 +1030,35 @@ static void native_motion(const uint8_t *old)
+     if (!designer_on() && !momentary.active && motion_native_edited(TSEL, old))
+         motion_unplayed();
+ }
++/* ORDER (the track's rack, KNOB 3): slot r's effect moves to r + dir, the one there to r. Both restart from silence
++ * (their states fade in again: no tail is carried to the other place) */
++static void fx_track_move(track_t *t,uint32_t r,int32_t dir)
++{
++    int32_t to=(int32_t)r+(dir>0?1:-1);
++    if(r>=FX_SLOTS || to<0 || to>=(int32_t)FX_SLOTS)return;
++    uint32_t ti=(uint32_t)(t-trk),a=P_FXTYPE+r*FX_PARAMS,b=P_FXTYPE+(uint32_t)to*FX_PARAMS;
++    fm1_irq_off();
++    for(uint32_t k=0;k<FX_PARAMS;k++){int16_t x=t->p[a+k];t->p[a+k]=t->p[b+k];t->p[b+k]=x;}
++    {int16_t x=t->p[P_FXTONE+r];t->p[P_FXTONE+r]=t->p[P_FXTONE+(uint32_t)to];t->p[P_FXTONE+(uint32_t)to]=x;}
++    if(ti<NPART){fx_state[FX_TRACK_SI(ti,r)].epoch=fx_epoch-1u;fx_state[FX_TRACK_SI(ti,(uint32_t)to)].epoch=fx_epoch-1u;}
++    fm1_irq_on();
++}
++
++/* REVERB and DELAY run once (core.h fx_single): choosing one in a slot (keep) turns it off wherever else it is, every
++ * track's rack and the shared one */
++static void fx_single_take(const int16_t *keep, int32_t type)
++{
++    if (!fx_single(type)) return;
++    for (uint32_t k = 0; k < NPART; k++)
++        for (uint32_t slot = 0; slot < FX_SLOTS; slot++) {
++            int16_t *v = &trk[k].p[P_FXTYPE + slot * FX_PARAMS];
++            if (v != keep && *v == type) *v = FX_OFF;
++        }
++    for (uint32_t slot = 0; slot < FX_SLOTS; slot++) {
++        int16_t *v = &song.g[G_MFXTYPE + slot * FX_PARAMS];
++        if (v != keep && *v == type) *v = FX_OFF;
++    }
++}
+ static void edit_param(uint32_t slot, int32_t steps)
+ {
+     int16_t *vp;
+@@ -1130,6 +1159,30 @@ static void edit_param(uint32_t slot, int32_t steps)
+         fx_rack_row[sh] = (uint8_t)clamp((int32_t)fx_rack_row[sh] + (steps > 0 ? 1 : -1), 0, (int32_t)FX_SLOTS);
+         return;
+     }
++    if (pg->graph == GR_FXRACK && slot == 2u && fx_rack_row[pg->scope == SC_GLOBAL] < FX_SLOTS) {
++        uint32_t sh = pg->scope == SC_GLOBAL, r = fx_rack_row[sh];
++        int32_t want = midi_edit_value >= 0 ? (sh ? (midi_edit_value >= 64) : (midi_edit_value * (int32_t)(FX_SLOTS - 1u) + 63) / 127)
++                                            : (sh ? (int32_t)((fx_master_use >> r) & 1u) : (int32_t)r) + (steps > 0 ? 1 : -1);
++        if (!sh) {                                      /* FX's KNOB 3: ORDER, the effect moves and the row with it */
++            if (midi_track_only(TSEL)) return;
++            want = clamp(want, 0, (int32_t)FX_SLOTS - 1);
++            uint32_t f = motion_guard();
++            while ((int32_t)r != want) { fx_track_move(TSEL, r, want > (int32_t)r ? 1 : -1); r = (uint32_t)((int32_t)r + (want > (int32_t)r ? 1 : -1)); }
++            motion_unguard(f);
++            fx_rack_row[0] = (uint8_t)r;
++        } else {                                        /* SHARED's KNOB 3 on a slot: USE, SEND or MASTER */
++            uint32_t bit = 1u << r, on = clamp(want, 0, 1) != 0;
++            if (((fx_master_use & bit) != 0) != on) {
++                fm1_irq_off();
++                fx_master_use = (uint8_t)(on ? fx_master_use | bit : fx_master_use & ~bit);
++                fx_state[r].epoch = fx_epoch - 1u;      /* (it starts over in its new place: no tail carried) */
++                fm1_irq_on();
++                ui_say("FX ", on ? "MASTER" : "SEND");
++            }
++        }
++        ui.force = 1;
++        return;
++    }
+     d = page_desc(pg, slot, &vp);
+     if (!d || !vp || d->max == d->min)
+         return;
+@@ -1151,7 +1204,15 @@ static void edit_param(uint32_t slot, int32_t steps)
+     }
+     if(pg->scope==SC_GLOBAL && vp>=song.g+G_MFXTYPE && vp<=song.g+G_MFX3TYPE &&
+        ((uint32_t)(vp-song.g)-G_MFXTYPE)%FX_PARAMS==0u){
+-        uint32_t flags=motion_guard();shared_fx_select(song.g,((uint32_t)(vp-song.g)-G_MFXTYPE)/FX_PARAMS,v);motion_unguard(flags);
++        uint32_t flags=motion_guard();
++        if(*vp!=v)fx_single_take(vp,v);                 /* (REVERB / DELAY: from a track's rack too) */
++        shared_fx_select(song.g,((uint32_t)(vp-song.g)-G_MFXTYPE)/FX_PARAMS,v);motion_unguard(flags);
++    }else if(pg->scope==SC_TRACK && vp>=TSEL->p+P_FXTYPE && vp<=TSEL->p+P_FX3TYPE && ((uint32_t)(vp-TSEL->p)-P_FXTYPE)%FX_PARAMS==0u){
++        uint32_t flags=motion_guard();
++        if(*vp!=v)fx_single_take(vp,v);
++        *vp=(int16_t)v;
++        if(v==FX_DELAY && (vp[2]<0 || vp[2]>=(int16_t)FX_DLY_DIVS))vp[2]=FX_DLY_DEF;
++        motion_unguard(flags);
+     }else *vp = (int16_t)v;
+     if(pg->scope==SC_P5){
+         uint8_t old[MO_NATIVE_N];uint32_t f=motion_guard();
+@@ -1186,7 +1247,7 @@ static void edit_param(uint32_t slot, int32_t steps)
+         return;
+     }
+     if (pg->scope == SC_GLOBAL && (pg->id[slot] == G_A4 || pg->id[slot] == G_BUDGET ||
+-                                   (pg->id[slot] >= G_WP5 && pg->id[slot] <= G_SAFETY))) {
++                                   weight_kind(pg->id[slot]) >= 0 || pg->id[slot] == G_SAFETY)) {
+         settings_save();
+         return;
+     }
+@@ -2042,6 +2103,7 @@ static void ui_confirm_accept(void)
+             song.g[i] = GP[i].def;
+         for (uint32_t i = G_MFXTONE; i <= G_MFX3TONE; i++)
+             song.g[i] = 0;
++        fx_master_use = 0;
+         ui_message("SHARED FX CLEARED");
+     } else if (kind == CF_CLEAR_MOTION) {                /* (playing: at the loop end, dq_defer) */
+         uint32_t k = ui.confirm_trk % NTRK;
+diff --git a/firmware/src/ui_pages.c b/firmware/src/ui_pages.c
+index 669b96d..03ad85d 100644
+--- a/firmware/src/ui_pages.c
++++ b/firmware/src/ui_pages.c
+@@ -137,7 +137,8 @@ static void pv_rack_rows(void)
+     uint32_t sh = pg->scope == SC_GLOBAL, k, j, keep = fx_rack_row[sh];
+     const int16_t *fx = sh ? song.g + G_MFXTYPE : TSEL->p + P_FXTYPE, *bus = song.g + G_MFXTYPE;
+     uint16_t k1 = T_KNOB(0), k2 = T_KNOB(1), k4 = T_KNOB(3);
+-    uint32_t sg = keep * 7u + ux.gen * 977u + ux.pal * 31u + song.sel * 13u + sh * 5003u + (uint32_t)song.g[G_FXMODE] * 7907u;
++    uint32_t sg = keep * 7u + ux.gen * 977u + ux.pal * 31u + song.sel * 13u + sh * 5003u + (uint32_t)song.g[G_FXMODE] * 7907u +
++                  fx_master_use * 104729u;
+     for (k = 0; k < FX_SLOTS * FX_PARAMS; k++)
+         sg = (sg ^ (uint16_t)fx[k] ^ (uint32_t)(uint16_t)bus[k] << 16) * 16777619u;
+     for (k = 0; k < FX_SLOTS; k++)
+@@ -179,6 +180,8 @@ static void pv_rack_rows(void)
+             b[1] = 0;
+             cv_text_on(10, ty_y(12, TY_TX), TY_TX, b, sel ? k2 : T_MID, bg);
+             menu_words(nm, on ? N_FX[clamp(fx[k * FX_PARAMS], 0, FX_COUNT - 1)] : "--", sizeof nm);
++            if (sh && on && ((fx_master_use >> k) & 1u))  /* (USE MASTER: the whole mix through it) */
++                vx = cv_text_r(228, ty_y(12, TY_LB), TY_LB, "MASTER", sel ? T_KNOB(2) : T_MID, bg) - 8;
+             cv_free_text(30, ty_y(12, TY_TX), TY_TX, nm, sel ? k1 : wc, bg, vx - 30);
+         } else if (sh) {                                /* RETURN: every track's */
+             for (j = 0; j < 4u; j++)
+@@ -192,7 +195,7 @@ static void pv_rack_rows(void)
+             cv_line(15, 16, 19, 12, ac);
+             x = cv_text_on(30, ty_y(12, TY_TX), TY_TX, "Shared", wc, bg) + 8;
+             for (j = 0; j < FX_SLOTS && x < vx - 12; j++) {
+-                if (bus[j * FX_PARAMS] == FX_OFF)
++                if (bus[j * FX_PARAMS] == FX_OFF || ((fx_master_use >> j) & 1u))   /* (MASTER: not a send's) */
+                     continue;
+                 if (n++) {                              /* (a chain: an arrow between; SPLIT: a comma) */
+                     if (song.g[G_FXMODE]) {
+@@ -699,7 +702,7 @@ static void pv_fx(int32_t h)
+     const page_t *pg = cur_page();
+     uint32_t master = pg->scope == SC_GLOBAL, slot = (pg->id[0] - (master ? G_MFXMIX : P_FXMIX)) / FX_PARAMS, k;
+     const int16_t *p = (master ? song.g : TSEL->p) + pg->id[0] - 1u;   /* TYPE MIX RATE CHAR */
+-    uint32_t type = (uint32_t)clamp(p[0], 0, FX_COUNT - 1), failed = (master ? fx_state[slot].failed : 0u);
++    uint32_t type = (uint32_t)clamp(p[0], 0, FX_COUNT - 1), failed = fx_state[master ? slot : FX_TRACK_SI(song.sel % NPART, slot)].failed;
+     int32_t mix = p[1], rate = p[2], cha = p[3], tone = master ? song.g[G_MFXTONE + slot] : TSEL->p[P_FXTONE + slot];
+     int strip = (fx_has_tone((int32_t)type) || fx_drive((int32_t)type)) && !failed, i;
+     int32_t ly = h - lf->h - 4, sy = ly - 9, top = 8 * 16;
+@@ -770,7 +773,7 @@ static void pv_picture(void)
+     if (pic == 9u) {                                    /* FX: the slot's effect (no column) and its buffer */
+         uint32_t m = cur_page()->scope == SC_GLOBAL, id = cur_page()->id[0];
+         sig ^= (uint32_t)(m ? song.g : TSEL->p)[id - 1u] * 7919u +
+-               (uint32_t)(m ? fx_state[(id-G_MFXMIX)/FX_PARAMS].failed : 0u) * 347u;
++               (uint32_t)fx_state[m ? (id-G_MFXMIX)/FX_PARAMS : FX_TRACK_SI(song.sel % NPART, (id-P_FXMIX)/FX_PARAMS)].failed * 347u;
+     }
+     if (pic >= 5u) {                                    /* ARP, PATTERN: the keys and steps */
+         sig ^= steps_hash(TSEL) + (song.playing ? 1u + TSEL->seq_idx * 257u : 0u) * 2246822519u;
+diff --git a/firmware/src/ui_popup.c b/firmware/src/ui_popup.c
+index 215be58..117a2a0 100644
+--- a/firmware/src/ui_popup.c
++++ b/firmware/src/ui_popup.c
+@@ -604,7 +604,7 @@ static void pop_row(int32_t y, const char *lb, const char *v, int on, int red, i
+ /* the effects' list (OCT+ on an empty slot, as the sound browser: README "FX rack"): under the header the slot, the
+  * family in its colour and the effect's place in it; the family's effects, the one picked a card with what its knobs
+  * are (KNOB 2 .. 4), the knobs' words in the family's colour */
+-static const char *const FX_KNOB_WORDS[NELEM(FX_ORDER)] = {"", "SIZE DECAY TONE", "SIZE DAMP TONE", "RATE DEPTH",
++static const char *const FX_KNOB_WORDS[NELEM(FX_ORDER)] = {"", "SIZE DECAY TONE", "SIZE DAMP TONE", "TIME FDBK TONE", "RATE DEPTH",
+     "RATE DEPTH", "RATE DEPTH", "RATE DEPTH RESO", "RATE DEPTH RESO", "RATE DEPTH RESO", "DRIVE TONE SHAPE",
+     "BITS ALIAS", "RATE FOCUS", "RATE JITTER", "RATE BITE", "TIME DECAY", "REL"};
+ #define FXL_H (240 - H_HEAD)
+diff --git a/firmware/src/voice.c b/firmware/src/voice.c
+index e8a1bf1..dabb18c 100644
+--- a/firmware/src/voice.c
++++ b/firmware/src/voice.c
+@@ -133,7 +133,12 @@ static uint32_t voice_units(const track_t *t)
+ {
+     const engine_t *e = ENGINES[t->engine];
+     /* GLO > WEIGHTS: the player's points per voice replace the built-in rule; AUTO (0) keeps it. */
++#if MELODEE_FELUCCA_ENGINES                            /* (params.c weight_kind's order) */
++    int k = e == &ENG_P5_TEST ? 0 : e == &ENG_FM6 ? 1 : e == &ENG_DRUM ? 2 : e == &ENG_FPHASE ? 3 : e == &ENG_LOFI ? 4 :
++            e == &ENG_FORMANT ? 5 : e == &ENG_TRIO ? 6 : e == &ENG_WHEEL ? 7 : e == &ENG_PHYS ? 8 : -1;
++#else
+     int k = e == &ENG_P5_TEST ? 0 : (MELODEE_CZ&&e==&ENG_CZ) ? 1 : e == &ENG_FM6 ? 2 : (MELODEE_SID&&e==&ENG_SID) ? 3 : e == &ENG_DRUM ? 4 : -1;
++#endif
+     if (k >= 0 && settings_vpoints[k] > 0)
+         return (uint32_t)settings_vpoints[k];
+ #if MELODEE_ADMISSION
+diff --git a/tests/fx_dormant_test.c b/tests/fx_dormant_test.c
+index 0b1f2d8..9a9fe96 100644
+--- a/tests/fx_dormant_test.c
++++ b/tests/fx_dormant_test.c
+@@ -116,7 +116,8 @@ static void trace(int audio_only)
+             }
+             fx_bus_start(CTL);fx_bus_join();digest(&fx_bus_result,sizeof fx_bus_result);
+             digest(fx_left,sizeof fx_left);digest(fx_right,sizeof fx_right);
+-            for(uint32_t si=0;si<FX_STATE_COUNT;si++){
++            /* the frozen PCM trace digests the shared slots only (track inserts never run here) */
++            for(uint32_t si=0;si<(audio_only?FX_SLOTS:FX_STATE_COUNT);si++){
+                 /* The PCM/allocation trace also compares different state
+                  * layouts; the ordinary trace checks full dormant state. */
+                 if(!audio_only){fx_state_t f=fx_state[si];if(f.type==FX_CHORUS)f.echo=0;digest(&f,sizeof f);}
+diff --git a/tests/fx_kernel_fixture.h b/tests/fx_kernel_fixture.h
+index 0a63620..b42fe54 100644
+--- a/tests/fx_kernel_fixture.h
++++ b/tests/fx_kernel_fixture.h
+@@ -3,6 +3,7 @@
+  * Portions Copyright (C) 2026 Leo Kuroshita (@kurogedelic), Hügelton Instruments */
+ /* DSP input fixture, not an application insert path. Exercises shared kernels
+  * with historical mono/spread input and pan to retain their PCM oracles. */
++#ifndef FX_HAS_TRACK_INSERTS                      /* (the firmware has them again: fx.c) */
+ static __attribute__((noinline,section(".dsp_text"))) void fx_pan(track_t *t,int32_t *b,uint32_t n)
+ {
+     if(!spread_on){
+@@ -29,6 +30,7 @@ static __attribute__((noinline,section(".audio_text"))) void fx_post_pan(track_t
+         fx_left[i]=fx_scale(fx_left[i],(uint32_t)gl*16u);fx_right[i]=fx_scale(fx_right[i],(uint32_t)gr*16u);
+     }
+ }
++#endif
+ static int fx_kernel_process(track_t *t,int32_t *b,uint32_t n)
+ {
+     int active=0;fx_pan(t,b,n);
+diff --git a/tests/fx_routes_test.c b/tests/fx_routes_test.c
+new file mode 100644
+index 0000000..f6e05b7
+--- /dev/null
++++ b/tests/fx_routes_test.c
+@@ -0,0 +1,182 @@
++/* SPDX-License-Identifier: GPL-3.0-only
++ * Copyright (C) 2026 Kerem Kilic (Ellic Studio) */
++/* The FX section's routes: a track's inserts (CHAIN, in ORDER), the shared slots' USE (SEND or MASTER), DELAY (tempo
++ * time, repeats, its 32 KiB tank, one at a time with REVERB's rule) and their persistence in projects and templates. */
++#define UI_TEST_NO_MAIN 1
++#include "ui_test.c"
++#include <assert.h>
++
++static void reset_all(void)
++{
++    ui_power_on();
++    for (uint32_t id = 0; id < RES_COUNT; id++) resource_release(id);
++    memset(fx_state, 0, sizeof fx_state);
++    fx_clear_all();
++    fx_master_use = 0;
++    song.master_q12 = 4096;                                 /* (the host's master pot: up) */
++}
++/* the first block (of 1 / 22.05 kHz pairs) after an impulse where the delay's echo shows, and its size */
++static void delay_echo(uint32_t div, uint32_t *at, int64_t *size, int64_t *second)
++{
++    reset_all();
++    track_t *t = &trk[0];
++    song.g[G_BPM] = 120;
++    t->p[P_FXTYPE] = FX_DELAY; t->p[P_FXMIX] = 127; t->p[P_FXRATE] = (int16_t)div; t->p[P_FXCHAR] = 64; t->p[P_FXTONE] = 0;
++    int32_t b[CTL];
++    uint32_t want = fx_delay_len(div) * 2u, found = 0;
++    int64_t best = 0, next = 0;
++    *at = 0;
++    for (uint32_t f = 0; f < 3u * want + 4u * CTL; f += CTL) {
++        for (uint32_t i = 0; i < CTL; i++) b[i] = f == 0 && i < 8u ? 20000 : 0;
++        assert(fx_process(t, b, CTL));
++        for (uint32_t i = 0; i < CTL; i++) {
++            int64_t a = fx_left[i] < 0 ? -fx_left[i] : fx_left[i];
++            if (f + i > CTL && f + i < want + want / 2u && a > best) { best = a; *at = f + i; found = 1; }
++            if (f + i > want + want / 2u && a > next) next = a;
++        }
++    }
++    assert(found);
++    *size = best; *second = next;
++}
++static void delay_test(void)
++{
++    uint32_t at; int64_t a, b;
++    for (uint32_t div = 2; div < FX_DLY_DIVS; div += 3) {      /* 1/16, 1/16D, 1/4T, 1/2T at 120 BPM */
++        delay_echo(div, &at, &a, &b);
++        uint32_t want = beat_samples() * FX_DLY_UNITS[div] / 48u;   /* (half rate; longer than the tank: halved) */
++        while (want > 16384u - 4u) want >>= 1;
++        want *= 2u;
++        assert(at + 8u >= want && at <= want + 8u);               /* the echo at the division's time (half rate: +-2) */
++        assert(a > 2000 && b > 0 && b < a);                       /* audible, then a smaller repeat (FDBK) */
++        assert(resource[RES_FX0 + FX_TRACK_SI(0, 0)].size == 32768u);
++    }
++    /* 1/2 at 40 BPM is 1.5 s: halved until it fits the 0.74 s tank */
++    song.g[G_BPM] = 40;
++    assert(fx_delay_len(FX_DLY_DIVS - 1u) <= 16384u - 4u && fx_delay_len(FX_DLY_DIVS - 1u) > 8000u);
++    /* MIX 0: dry, the tank given back */
++    trk[0].p[P_FXMIX] = 0;
++    int32_t z[CTL] = {0};
++    for (uint32_t k = 0; k < 64; k++) fx_process(&trk[0], z, CTL);
++    assert(!resource[RES_FX0 + FX_TRACK_SI(0, 0)].size);
++    /* its controls: TIME the divisions, FDBK, TONE */
++    trk[0].p[P_FXTYPE] = FX_DELAY;
++    char v[12]; const char *u;
++    const param_desc_t *d = track_desc(&trk[0], P_FXRATE);
++    assert(str_eq(d->label, "TIME") && d->max == (int16_t)FX_DLY_DIVS - 1);
++    param_format(d, 8, v, &u); assert(str_eq(v, "1/4"));
++    assert(str_eq(track_desc(&trk[0], P_FXCHAR)->label, "FDBK"));
++    puts("DELAY: tempo divisions on time, decaying repeats, a long time halved to fit, 32 KiB given back at MIX 0, TIME/FDBK: OK");
++}
++static void single_test(void)
++{
++    reset_all();
++    /* REVERB / DELAY: one at a time, choosing one takes it from the other rack */
++    song.g[G_MFX2TYPE] = FX_DELAY;
++    go_title("FX"); fx_rack_row[0] = 0;
++    TSEL->p[P_FXTYPE] = FX_REVERB;
++    for (int k = 0; k < 3 && TSEL->p[P_FXTYPE] != FX_DELAY; k++) turn(EN_K1, 1);
++    assert(TSEL->p[P_FXTYPE] == FX_DELAY && song.g[G_MFX2TYPE] == FX_OFF);
++    go_title("SHARED"); fx_rack_row[1] = 2;
++    song.g[G_MFX3TYPE] = FX_REVERB; turn(EN_K1, 1); assert(song.g[G_MFX3TYPE] == FX_DELAY && TSEL->p[P_FXTYPE] == FX_OFF);
++    /* two DELAYs loaded anyway: the second stays silent, the first keeps the tank */
++    reset_all();
++    trk[0].p[P_FXTYPE] = trk[1].p[P_FXTYPE] = FX_DELAY; trk[0].p[P_FXMIX] = trk[1].p[P_FXMIX] = 127;
++    trk[0].p[P_FXRATE] = trk[1].p[P_FXRATE] = 5;
++    int32_t b[CTL]; for (uint32_t i = 0; i < CTL; i++) b[i] = 1000;
++    fx_process(&trk[0], b, CTL); fx_process(&trk[1], b, CTL);
++    assert(resource[RES_FX0 + FX_TRACK_SI(0, 0)].size == 32768u && !resource[RES_FX0 + FX_TRACK_SI(1, 0)].size);
++    puts("REVERB / DELAY: one at a time across the racks, a second one silent: OK");
++}
++static void order_test(void)
++{
++    reset_all();
++    track_t *t = TSEL;
++    int16_t a[FX_PARAMS] = {FX_PHASER, 80, 30, 71}, c[FX_PARAMS] = {FX_CRUSH, 95, 55, 65};
++    memcpy(t->p + P_FXTYPE, a, sizeof a); memcpy(t->p + P_FX3TYPE, c, sizeof c);
++    t->p[P_FXTONE] = 5; t->p[P_FX3TONE] = -9;
++    go_title("FX"); fx_rack_row[0] = 0;
++    int16_t *vp; const param_desc_t *d = page_desc(cur_page(), 2, &vp);
++    assert(d && str_eq(d->label, "ORDER") && *vp == 0);
++    turn(EN_K3, 1);                                         /* PHASER to 2nd */
++    assert(fx_rack_row[0] == 1 && t->p[P_FX2TYPE] == FX_PHASER && t->p[P_FX2MIX] == 80 && t->p[P_FX2TONE] == 5 && !t->p[P_FXTYPE]);
++    turn(EN_K3, 1);                                         /* .. 3rd: CRUSH comes up to 2nd */
++    assert(fx_rack_row[0] == 2 && t->p[P_FX3TYPE] == FX_PHASER && t->p[P_FX2TYPE] == FX_CRUSH && t->p[P_FX2TONE] == -9);
++    turn(EN_K3, 1); assert(fx_rack_row[0] == 2 && t->p[P_FX3TYPE] == FX_PHASER);   /* (the end) */
++    fx_rack_row[0] = 3; d = page_desc(cur_page(), 2, &vp); assert(!d);           /* (the shared row: no ORDER) */
++    /* the order is the sound: PHASER then CRUSH is not CRUSH then PHASER */
++    uint64_t h[2];
++    for (uint32_t k = 0; k < 2; k++) {
++        reset_all(); t = &trk[0];
++        memcpy(t->p + (k ? P_FX2TYPE : P_FXTYPE), a, sizeof a); memcpy(t->p + (k ? P_FXTYPE : P_FX2TYPE), c, sizeof c);
++        h[k] = 1469598103934665603ull;
++        int32_t b[CTL];
++        for (uint32_t f = 0; f < 200; f++) {
++            for (uint32_t i = 0; i < CTL; i++) b[i] = sine_i((f * CTL + i) * 0x01234567u) / 3;
++            assert(fx_process(t, b, CTL));
++            for (uint32_t i = 0; i < CTL; i++) h[k] = (h[k] ^ (uint32_t)fx_left[i]) * 1099511628211ull;
++        }
++    }
++    assert(h[0] != h[1]);
++    puts("ORDER: KNOB 3 moves the effect (all its controls and TONE), the row follows; the order changes the sound: OK");
++}
++static void master_test(void)
++{
++    reset_all();
++    int32_t out[CTL * 2];
++    set_engine_of(&trk[0], ENGI_FM6); apply_preset_to(&trk[0], 8);
++    trk[0].p[P_FXSEND] = 0;                                  /* no send: only MASTER can reach it */
++    song.g[G_MFXTYPE] = FX_CRUSH; song.g[G_MFXMIX] = 127; song.g[G_MFXRATE] = 10; song.g[G_MFXCHAR] = 100;
++    for (uint32_t k = 0; k < 40; k++) mix_block(out, CTL);
++    trk_note_on(&trk[0], 60, 100);
++    uint64_t h[2];
++    for (uint32_t use = 0; use < 2; use++) {
++        fx_master_use = (uint8_t)use; fx_state[0].epoch = fx_epoch - 1u;
++        h[use] = 1469598103934665603ull;
++        for (uint32_t k = 0; k < 200; k++) {
++            mix_block(out, CTL);
++            for (uint32_t i = 0; i < CTL * 2u; i++) { assert(out[i] >= -32767 && out[i] <= 32767); if (k > 40) h[use] = (h[use] ^ (uint32_t)out[i]) * 1099511628211ull; }
++        }
++    }
++    assert(h[0] != h[1]);                                    /* SEND without a send: dry; MASTER: crushed */
++    /* the rack: KNOB 3 on a slot USE; the track's Shared row leaves MASTER slots out (its SEND does not reach them) */
++    reset_all();
++    song.g[G_MFXTYPE] = FX_ROOM; song.g[G_MFX2TYPE] = FX_CRUSH;
++    go_title("SHARED"); fx_rack_row[1] = 1; turn(EN_K3, 1);
++    assert(fx_master_use == 2u);
++    /* persistence: project, template; old firmware refused (a byte it requires 0) */
++    project_t q; project_store_t p; project_capture(&q); assert(q.g[G_RESERVED24] == 2);
++    assert(proj_pack(&p, &q) && proj_import(&proj_scratch, &p, sizeof p) && proj_scratch.g[G_RESERVED24] == 2);
++    fx_master_use = 0; assert(!project_restore_runtime(&proj_scratch) && fx_master_use == 2u && !song.g[G_RESERVED24]);
++    template_save(); fx_master_use = 0; template_load(); assert(fx_master_use == 2u && song.g[G_FXMODE] == 0);
++    song.g[G_FXMODE] = 1; template_save(); fx_master_use = 0; song.g[G_FXMODE] = 0; template_load();
++    assert(fx_master_use == 2u && song.g[G_FXMODE] == 1);
++    ui.confirm = CF_CLEAR_SHARED; ui_confirm_accept();
++    assert(!fx_master_use);
++    puts("MASTER: the whole mix through a shared slot (no send needed), KNOB 3 USE, project/template persistence, Clear: OK");
++}
++static void track_insert_mix_test(void)
++{
++    /* a track's insert in the real mixer: audible, its tail rings on after the note, dry once MIX is 0 */
++    reset_all();
++    int32_t out[CTL * 2];
++    set_engine_of(&trk[0], ENGI_FM6); apply_preset_to(&trk[0], 8);
++    trk[0].p[P_FXTYPE] = FX_DELAY; trk[0].p[P_FXMIX] = 90; trk[0].p[P_FXRATE] = 5; trk[0].p[P_FXCHAR] = 90;
++    for (uint32_t k = 0; k < 40; k++) mix_block(out, CTL);
++    trk_note_on(&trk[0], 60, 100);
++    for (uint32_t k = 0; k < 40; k++) mix_block(out, CTL);
++    trk_note_off(&trk[0], 60);
++    for (uint32_t k = 0; k < 400; k++) mix_block(out, CTL);    /* (the note's release gone) */
++    uint64_t e = 0;
++    for (uint32_t k = 0; k < 200; k++) { mix_block(out, CTL); for (uint32_t i = 0; i < CTL * 2u; i++) e += (uint32_t)abs(out[i]); }
++    assert(e > 0);                                            /* the repeats ring on */
++    trk[0].p[P_FXMIX] = 0;
++    for (uint32_t k = 0; k < 64; k++) mix_block(out, CTL);
++    assert(!resource[RES_FX0 + FX_TRACK_SI(0, 0)].size);
++    puts("Track inserts in the mixer: an audible DELAY, its repeats after the note, given back at MIX 0: OK");
++}
++int main(void)
++{
++    delay_test(); single_test(); order_test(); master_test(); track_insert_mix_test();
++    puts("FX routes: passed");
++    return 0;
++}
+diff --git a/tests/fx_test.c b/tests/fx_test.c
+index 4fb35ee..165b5ae 100644
+--- a/tests/fx_test.c
++++ b/tests/fx_test.c
+@@ -63,7 +63,7 @@ static void legacy(void)
+ static void frozen_three_slots(void)
+ {
+     static uint8_t b[BANK_STORE_SIZE];const char *names[]={"fun18.bin","fbkk18.bin","tplh.bin"};
+-    const int16_t chain[12]={0,80,30,71,0,95,55,65,0,105,88,99};
++    const int16_t chain[12]={1,80,30,71,0,95,55,65,8,105,88,99};   /* (track inserts load again: PHASER, -, REVERB) */
+     for(uint32_t k=0;k<3;k++){
+         char path[96];snprintf(path,sizeof path,"tests/fixtures/fx/%s",names[k]);FILE *f=fopen(path,"rb");assert(f);uint32_t n=fread(b,1,sizeof b,f);fclose(f);ui_power_on();
+         if(k==2){assert(tmpl_take(b,n));template_load();}else {assert(k?bank_valid(b,n):proj_import(&proj_scratch,b,n));assert(!project_restore_runtime(&proj_scratch));}
+@@ -302,14 +302,14 @@ static void chorus_test(void)
+     }
+     project_t q;project_store_t p;project_capture(&q);assert(proj_pack(&p,&q) && proj_import(&proj_scratch,&p,sizeof p));
+     template_save();memset(trk[0].p+P_FXTYPE,0,FX_SLOTS*FX_PARAMS*sizeof(int16_t));memset(song.g+G_MFXTYPE,0,FX_SLOTS*FX_PARAMS*sizeof(int16_t));template_load();
+-    int32_t b[CTL]={0};fx_bus_start(CTL);fx_bus_join();assert(fx_bus_result);
+-    for(uint32_t slot=0;slot<FX_SLOTS;slot++){
+-        assert(trk[0].p[P_FXTYPE+slot*FX_PARAMS]==FX_OFF && song.g[G_MFXTYPE+slot*FX_PARAMS]==FX_CHORUS);
+-        assert(resource[RES_FX0+slot].size==FX_CHORUS_BYTES);
++    int32_t b[CTL]={0};assert(fx_process(&trk[0],b,CTL));fx_bus_start(CTL);fx_bus_join();assert(fx_bus_result);
++    for(uint32_t slot=0;slot<FX_SLOTS;slot++){                                   /* (track inserts kept again) */
++        assert(trk[0].p[P_FXTYPE+slot*FX_PARAMS]==FX_CHORUS && song.g[G_MFXTYPE+slot*FX_PARAMS]==FX_CHORUS);
++        assert(resource[RES_FX0+FX_TRACK_SI(0,slot)].size==FX_CHORUS_BYTES && resource[RES_FX0+slot].size==FX_CHORUS_BYTES);
+         trk[0].p[P_FXTYPE+slot*FX_PARAMS]=song.g[G_MFXTYPE+slot*FX_PARAMS]=FX_OFF;
+     }
+-    for(uint32_t k=0;k<24;k++){fx_bus_start(CTL);fx_bus_join();}
+-    for(uint32_t slot=0;slot<FX_SLOTS;slot++)assert(!resource[RES_FX0+slot].size && !resource[RES_FX0+slot].size);
++    for(uint32_t k=0;k<24;k++){fx_process(&trk[0],b,CTL);fx_bus_start(CTL);fx_bus_join();}
++    for(uint32_t slot=0;slot<FX_SLOTS;slot++)assert(!resource[RES_FX0+FX_TRACK_SI(0,slot)].size && !resource[RES_FX0+slot].size);
+     puts("Chorus: full-band independent stereo, bounded hot inputs, exact silent tail, 2 KiB/slot, RATE/DEPTH, insert/send persistence and bypass release: OK");
+ }
+ static uint64_t tone_energy(uint32_t type,int tone,uint32_t hz)
+@@ -432,7 +432,7 @@ static void tone_test(void)
+         FILE *f=fopen(cuts[k],"rb");assert(f);uint32_t n=fread(old,1,sizeof old,f);fclose(f);ui_power_on();
+         if(k){assert(tmpl_take(old,n));template_load();}else{assert(proj_import(&proj_scratch,old,n));assert(proj_scratch.motion.count==1 && proj_scratch.motion.event[0].param==P_E3);assert(!project_restore_runtime(&proj_scratch));}
+         assert(song.g[G_FXMODE]==1 && song.g[G_MFXTYPE]==FX_REVERB && song.g[G_MFX2TYPE]==FX_OFF && song.g[G_FXRETURN]==73);
+-        assert(TSEL->p[P_FXTYPE]==FX_OFF && TSEL->p[P_FXMIX]==91 && TSEL->p[P_FX2TYPE]==FX_OFF && TSEL->p[P_FXSEND2]==71);
++        assert(TSEL->p[P_FXTYPE]==FX_OFF && TSEL->p[P_FXMIX]==91 && TSEL->p[P_FX2TYPE]==FX_ROOM && TSEL->p[P_FXSEND2]==71);   /* (track ROOM kept) */
+         assert(TSEL->p[P_E3]==clamp(42,track_desc(TSEL,P_E3)->min,track_desc(TSEL,P_E3)->max));
+         assert(TSEL->p[P_FXTONE]>0 && abs(fx_tone_hz(TSEL->p[P_FXTONE])-200)<10);     /* LO CUT 200 Hz */
+         assert(TSEL->p[P_FX2TONE]<0 && abs(fx_tone_hz(TSEL->p[P_FX2TONE])-500)<20);   /* HI CUT 500 Hz */
+@@ -445,11 +445,11 @@ static void tone_test(void)
+ }
+ static void grouped_fx_test(void)
+ {
+-    static const uint8_t order[] = {FX_OFF, FX_ROOM, FX_REVERB, FX_WIDTH, FX_PHASER, FX_CHORUS,
++    static const uint8_t order[] = {FX_OFF, FX_ROOM, FX_REVERB, FX_DELAY, FX_WIDTH, FX_PHASER, FX_CHORUS,
+         FX_FLANGER, FX_PEDAL_PHASER, FX_PEDAL_CHORUS, FX_SOFT, FX_CRUSH, FX_FORMANT, FX_TAPE, FX_SPIT,
+         FX_MIDIDELAY, FX_MIDIVERB};
+     ui_power_on();
+-    for (uint32_t shared = 1; shared < 2; shared++) {
++    for (uint32_t shared = 0; shared < 2; shared++) {              /* (the track's rack lists audio effects again) */
+         const param_desc_t *d = shared ? &GP[G_MFXTYPE] : &TP[P_FXTYPE];
+         uint32_t n = NELEM(order) - (shared ? 2u : 0u);
+         assert(enum_rows(d) == n);
+@@ -509,8 +509,9 @@ static void rack_test(void)
+     head_chip_text(chip);assert(str_eq(chip,"NOTE ECHO"));
+     press(B_OCTDN);assert(str_eq(cur_page()->title,"FX") && fx_rack_row[0]==0);
+     turn(EN_K2,1);press(B_OCTUP);assert(pop.on==POP_LIST);                         /* an empty slot: the list */
+-    turn(EN_K2,1);turn(EN_K2,1);press(B_OCTUP);assert(pop.on==POP_NONE && TSEL->p[P_FX2TYPE]==FX_MIDIDELAY);
+-    press(B_OCTUP);assert(cur_page()->id[0]==P_FX2MIX);head_chip_text(chip);assert(str_eq(chip,"NOTE ECHO"));
++    turn(EN_K2,1);turn(EN_K2,1);press(B_OCTUP);assert(pop.on==POP_NONE && TSEL->p[P_FX2TYPE]==FX_DELAY);   /* (ROOM, REVERB, DELAY) */
++    assert(TSEL->p[P_FX2RATE]==FX_DLY_DEF);                                         /* (DELAY's TIME: 1/8) */
++    press(B_OCTUP);assert(cur_page()->id[0]==P_FX2MIX);head_chip_text(chip);assert(str_eq(chip,"DELAY"));
+     press(B_FX);assert(str_eq(cur_page()->title,"FX"));                            /* FX from a slot: the rack */
+     turn(EN_SELECT,1);assert(cur_page()->id[0]==P_FXMIX);turn(EN_SELECT,1);assert(cur_page()->id[0]==P_FX2MIX);
+     turn(EN_SELECT,1);assert(str_eq(cur_page()->title,"SHARED"));                  /* (slot 3 empty: none) */
+@@ -520,9 +521,13 @@ static void rack_test(void)
+     fx_rack_row[1]=0;turn(EN_K1,1);assert(song.g[G_MFXTYPE]!=FX_OFF);song.g[G_MFXTYPE]=FX_ROOM;
+     song.g[G_MFXMIX]=100;turn(EN_K4,-1);assert(song.g[G_MFXMIX]<100);             /* CHAIN: the slot's MIX */
+     song.g[G_FXMODE]=1;TSEL->p[P_FXSEND]=30;turn(EN_K4,1);assert(TSEL->p[P_FXSEND]>30 && song.g[G_MFXMIX]<100);   /* SPLIT */
+-    turn(EN_K3,-1);assert(!song.g[G_FXMODE]);turn(EN_K3,1);assert(song.g[G_FXMODE]==1);   /* KNOB 3: ROUTE */
++    turn(EN_K3,1);assert(fx_master_use==1u);                                       /* KNOB 3 on a slot: USE MASTER */
++    {int16_t *vp;const param_desc_t *d=page_desc(cur_page(),2,&vp);assert(d && str_eq(d->label,"USE") && *vp==1);
++     d=page_desc(cur_page(),3,&vp);assert(vp==&song.g[G_MFXMIX]);}                 /* (MASTER: its MIX, in SPLIT too) */
++    turn(EN_K3,-1);assert(!fx_master_use);
++    fx_rack_row[1]=3;turn(EN_K3,-1);assert(!song.g[G_FXMODE]);turn(EN_K3,1);assert(song.g[G_FXMODE]==1);   /* RETURN's KNOB 3: ROUTE */
+     {int16_t *vp;const param_desc_t *d=page_desc(cur_page(),2,&vp);assert(d && vp==&song.g[G_FXMODE] && str_eq(d->label,"ROUTE"));
+-     go_title("FX");assert(!page_desc(cur_page(),2,&vp));go_title("SHARED");}                 /* (FX's KNOB 3: none) */
++     fx_rack_row[1]=0;go_title("FX");fx_rack_row[0]=0;d=page_desc(cur_page(),2,&vp);assert(d && str_eq(d->label,"ORDER"));go_title("SHARED");}
+     press(B_OCTUP);assert(cur_page()->scope==SC_GLOBAL && cur_page()->id[0]==G_MFXMIX);head_chip_text(chip);assert(str_eq(chip,"ROOM"));
+     press(B_OCTDN);assert(str_eq(cur_page()->title,"SHARED") && fx_rack_row[1]==0);
+     press(B_OCTDN);assert(str_eq(cur_page()->title,"FX"));press(B_OCTDN);assert(ui.home);
+@@ -578,9 +583,9 @@ int main(int argc,char **argv)
+     }
+     for(uint32_t id=0;id<RES_COUNT;id++)resource_release(id);
+     ui_power_on();press(B_FX);assert(!ui.home && cur_page()->fam==FAM_FX && !ui.layer);
+-    fx_rack_row[0]=0;turn(EN_K1,1);turn(EN_K1,1);assert(TSEL->p[P_FXTYPE]==FX_MIDIDELAY);turn(EN_K4,50);assert(TSEL->p[P_FXMIX]>0);
++    fx_rack_row[0]=0;turn(EN_K1,1);turn(EN_K1,1);assert(TSEL->p[P_FXTYPE]==FX_REVERB);   /* (ROOM, REVERB: audio inserts again) */turn(EN_K4,50);assert(TSEL->p[P_FXMIX]>0);
+     project_t q;project_capture(&q);project_store_t p;assert(proj_pack(&p,&q));
+-    assert(proj_import(&proj_scratch,&p,sizeof p));assert(proj_scratch.t[0].p[P_FXTYPE]==FX_MIDIDELAY);
++    assert(proj_import(&proj_scratch,&p,sizeof p));assert(proj_scratch.t[0].p[P_FXTYPE]==FX_REVERB);
+     frames(400);press(B_OCTUP);assert(cur_page()->id[0]==P_FXMIX);press(B_OCTUP);assert(pop.on==POP_SHEET);
+     press(B_OCTDN);assert(!pop.on);press(B_OCTDN);assert(str_eq(cur_page()->title,"FX"));press(B_OCTDN);assert(ui.home);
+     /* Four live tracks through the actual mixer, then mute a sounding insert. */
+diff --git a/tests/midi_insert_test.c b/tests/midi_insert_test.c
+index e4903fc..f442776 100644
+--- a/tests/midi_insert_test.c
++++ b/tests/midi_insert_test.c
+@@ -170,7 +170,7 @@ static void original_recording(void)
+ static void ui_storage(void)
+ {
+     reset(); go_title("FX"); fx_rack_row[0] = 0;
+-    edit_param(0, 1); assert(TSEL->p[P_FXTYPE] == FX_MIDIVERB && TSEL->p[P_FXMIX] == 64);
++    edit_param(0, 16); assert(TSEL->p[P_FXTYPE] == FX_MIDIVERB && TSEL->p[P_FXMIX] == 64);  /* NOTE TAIL: last in the list */
+     int16_t *vp;
+     const page_t *slot = &PAGES[page_titled("FX 1")];
+     assert(str_eq(page_desc(slot, 0, &vp)->label, "REL"));
+@@ -178,19 +178,19 @@ static void ui_storage(void)
+     assert(!page_visible(page_titled("FX 1")));
+     press(B_OCTUP); assert(cur_page()->graph == GR_FXRACK);  /* NOTE TAIL edits REL in its row */
+     edit_param(3, 1); assert(TSEL->p[P_FXMIX] > 64);
+-    edit_param(0, 1); assert(TSEL->p[P_FXTYPE] == FX_MIDIDELAY && TSEL->p[P_FXRATE] == 1);
++    edit_param(0, -1); assert(TSEL->p[P_FXTYPE] == FX_MIDIDELAY && TSEL->p[P_FXRATE] == 1);
+     assert(page_visible(page_titled("FX 1")));
+     assert(str_eq(page_desc(slot, 0, &vp)->label, "LEVEL"));
+     assert(page_desc(slot, 1, &vp)->fmt == F_ENUM && page_desc(slot, 1, &vp)->max == 9);
+     assert(str_eq(page_desc(slot, 2, &vp)->label, "DECAY") && !page_desc(slot, 3, &vp));
+-    assert(GP[G_MFXTYPE].max == FX_PEDAL_CHORUS && GP[G_MFX2TYPE].max == FX_PEDAL_CHORUS && GP[G_MFX3TYPE].max == FX_PEDAL_CHORUS);
++    assert(GP[G_MFXTYPE].max == FX_DELAY && GP[G_MFX2TYPE].max == FX_DELAY && GP[G_MFX3TYPE].max == FX_DELAY);
+     delay(TSEL, 1, 4, 31); TSEL->p[P_FX3TYPE] = FX_MIDIVERB; TSEL->p[P_FX3MIX] = 90;
+     project_t q; project_store_t p; project_capture(&q); assert(proj_pack(&p, &q) && proj_import(&proj_scratch, &p, sizeof p));
+     for (uint32_t k = P_FXTYPE; k <= P_FX3CHAR; k++) assert(proj_scratch.t[0].p[k] == TSEL->p[k]);
+     template_save(); memset(TSEL->p + P_FXTYPE, 0, FX_SLOTS * FX_PARAMS * sizeof(int16_t)); template_load();
+     assert(TSEL->p[P_FXTYPE] == FX_MIDIDELAY && TSEL->p[P_FX2TYPE] == FX_MIDIDELAY && TSEL->p[P_FX3TYPE] == FX_MIDIVERB);
+-    assert(FX_STATE_COUNT==FX_SLOTS); /* note processors have no audio insert state */
+-    for (uint32_t k = 0; k < FX_SLOTS; k++) assert(!resource[RES_FX0+k].size);
++    /* note processors have no audio insert state */
++    for (uint32_t k = 0; k < FX_SLOTS; k++) assert(!resource[RES_FX0+k].size && !resource[RES_FX0+FX_TRACK_SI(0,k)].size);
+     puts("MIDI inserts: rack controls, shared exclusion, project/template round trips and no DSP allocation passed");
+ }
+ int main(void) { timing(); ownership(); verb(); fm6_release_rates(); original_recording(); ui_storage(); printf("MIDI insert state: %zu bytes\n", sizeof midi_insert + sizeof midi_verb); return 0; }
+diff --git a/tests/midi_knob_test.c b/tests/midi_knob_test.c
+index 0087365..4c92789 100644
+--- a/tests/midi_knob_test.c
++++ b/tests/midi_knob_test.c
+@@ -170,7 +170,7 @@ static int page_and_local_controls(void)
+     go_page(GR_FXRACK);
+     knob_cc(1, 93, 64); knob_cc(1, 93, 127);
+     d = page_desc(cur_page(), 0, &vp);
+-    bad += check("absolute note FX selection reaches NOTE ECHO", d && *vp == FX_MIDIDELAY && enum_rows(d) == 3);
++    bad += check("absolute FX selection reaches the last effect, NOTE TAIL", d && *vp == FX_MIDIVERB && enum_rows(d) == 17);
+     knob_cc(1, 93, 0); d = page_desc(cur_page(), 0, &vp);
+     bad += check("absolute FX selection returns to OFF across nonnumeric effect IDs", d && !*vp);
+     knob_reset(MK_OFF, MK_ABSOLUTE);
+diff --git a/tests/retired_fx_test.c b/tests/retired_fx_test.c
+index 5e56778..dcf4f19 100644
+--- a/tests/retired_fx_test.c
++++ b/tests/retired_fx_test.c
+@@ -45,7 +45,7 @@ static void storage(void)
+     template_save(); template_load();
+     for (uint32_t tr = 0; tr < NPART; tr++) for (uint32_t s = 0; s < FX_SLOTS; s++) assert(!trk[tr].p[P_FXTYPE+s*FX_PARAMS]);
+     for (uint32_t s = 0; s < FX_SLOTS; s++) assert(!song.g[G_MFXTYPE+s*FX_PARAMS]);
+-    const uint32_t kept[] = {FX_MIDIVERB,FX_MIDIDELAY};
++    const uint32_t kept[] = {FX_ROOM,FX_REVERB,FX_CHORUS,FX_MIDIVERB,FX_MIDIDELAY,FX_DELAY};
+     for (uint32_t k = 0; k < NELEM(kept); k++) {
+         TSEL->p[P_FXTYPE] = (int16_t)kept[k]; project_capture(&q);
+         assert(proj_pack(&p,&q) && proj_import(&proj_scratch,&p,sizeof p));
+@@ -59,10 +59,10 @@ static void controls(void)
+     assert(FX_ECHO == 6 && FX_ROOM == 7 && FX_REVERB == 8 && FX_CHORUS == 9 && FX_MIDIVERB == 10 && FX_MIDIDELAY == 11);
+     assert(!N_FX[FX_ECHO][0] && str_eq(N_FX[FX_REVERB],"REVERB") && !N_AUDIO_FX[FX_ECHO][0] && str_eq(N_AUDIO_FX[FX_REVERB],"REVERB"));
+     assert(enum_orig(&TP[P_FXTYPE],FX_ECHO)==FX_OFF && enum_orig(&GP[G_MFXTYPE],FX_REVERB)==FX_REVERB);
+-    assert(enum_step(&TP[P_FXTYPE],FX_OFF,FX_OFF+1)==FX_MIDIVERB);
+-    assert(enum_step(&TP[P_FXTYPE],FX_MIDIVERB,FX_MIDIVERB+1)==FX_MIDIDELAY);
+-    assert(enum_orig(&TP[P_FXTYPE],FX_REVERB)==FX_OFF);
+-    assert(enum_rows(&TP[P_FXTYPE])==3 && enum_rows(&GP[G_MFXTYPE])==14);
++    assert(enum_step(&TP[P_FXTYPE],FX_OFF,FX_OFF+1)==FX_ROOM);              /* (track inserts: every effect again) */
++    assert(enum_step(&TP[P_FXTYPE],FX_SPIT,FX_SPIT+1)==FX_MIDIDELAY);
++    assert(enum_step(&TP[P_FXTYPE],FX_ROOM,FX_REVERB)==FX_REVERB);
++    assert(enum_rows(&TP[P_FXTYPE])==17 && enum_rows(&GP[G_MFXTYPE])==15);   /* (DELAY in both) */
+     press(B_FX);assert(cur_page()->fam==FAM_FX);
+     btn_down(B_FX);frames(800);assert(ui.layer==LAYER_FX);
+     key_down(white(0));frame();assert(!gates() && kb_layer);key_up(white(0));frame();assert(!gates());
+diff --git a/tests/run_tests.sh b/tests/run_tests.sh
+index 3087d6c..8b8b398 100755
+--- a/tests/run_tests.sh
++++ b/tests/run_tests.sh
+@@ -278,6 +278,7 @@ phys_ref() {
+ # the longest first: they set the length of the run
+ sound && t "FX performance: all effects, four-track mixer, shared send bus and ordered three-effect chains" fx_performance -O2 $FW -- "$OUT/fx_performance" full
+ sound && t "FX: remaining inserts, smooth Tape, track ownership, dry bypass and retired-effects RAM reclamation" fx_test -O1 $FW
++sound && t "FX routes: track inserts in ORDER, shared USE SEND / MASTER, DELAY, one REVERB / DELAY, persistence" fx_routes_test -O1 $FWS
+ core && t "Retired Echo: reserved ID and reclaimed tanks; SLOOP Reverb and master punch controls" retired_fx_test -O1 $FW
+ sound && t "Master audio punch: 27 effects, history, freeze, transitions and key ownership" punch_master_test -O1 $FW
+ sound && t "SLOOP FX: compact stereo reverb, eight inserts, shared returns and controls" sloop_fx_test -O1 $FW
+@@ -416,6 +417,7 @@ if core && [ $TABLES = 1 ]; then
+     t "boot audio: codec waits for settled silent DMA and shuts down before I2S" audio_boot_test -w
+     t "audio: overload protection, bounded fades and DMA diagnostics" audio_test $FW
+     t "GLO > WEIGHTS: per-engine budget points, SAFETY, device persistence and pages" voice_weights_test $FW
++    t "GLO > WEIGHTS, shipping engines: nine weights, three pages, v2 record, v1 migration" voice_weights_felucca_test $FWS
+     t "audio: silent bench keeps synthesis running and silences physical output" audio_silent_test:audio_test \
+         -DMELODEE_BENCH_SILENT=1 $FW
+     t "384 shared presets: all-engine capacity, conversion, torn writes and high-slot identity" unified_presets_test $FW
+diff --git a/tests/sloop_fx_test.c b/tests/sloop_fx_test.c
+index fabbb88..1885af9 100644
+--- a/tests/sloop_fx_test.c
++++ b/tests/sloop_fx_test.c
+@@ -115,7 +115,7 @@ static void returns(void)
+     for(uint32_t type=FX_SOFT;type<=FX_PEDAL_CHORUS;type++){
+         TSEL->p[P_FXTYPE]=(int16_t)type;TSEL->p[P_FXTONE]=-63;song.g[G_MFXTYPE]=(int16_t)type;song.g[G_MFXTONE]=63;
+         project_capture(&q);assert(proj_pack(&p,&q) && proj_import(&proj_scratch,&p,sizeof p));
+-        assert(proj_scratch.t[0].p[P_FXTYPE]==FX_OFF && proj_scratch.t[0].p[P_FXTONE]==-63);
++        assert(proj_scratch.t[0].p[P_FXTYPE]==type && proj_scratch.t[0].p[P_FXTONE]==-63);   /* (track inserts kept) */
+         assert(proj_scratch.g[G_MFXTYPE]==type && proj_scratch.g[G_MFXTONE]==63);
+     }
+     puts("SLOOP routing: CHAIN/SPLIT sends, wet-only modulation return, rack labels and persistence passed");
+diff --git a/tests/theme_test.c b/tests/theme_test.c
+index 72c0e4c..5a9c4e9 100644
+--- a/tests/theme_test.c
++++ b/tests/theme_test.c
+@@ -46,10 +46,10 @@ int main(int argc, char **argv)
+     static const uint8_t pd[] = {0x08, 0xf0};
+     const aafont_t probe = {1, 1, 'A', 'A', 0, 0, pg, pd, 0, 0, 0};
+     double worst = 100;
+-    assert(NPALETTES == 8u && !strcmp(UI_PALETTES[0].name, "NIGHT") && !strcmp(UI_PALETTES[1].name, "DAY") &&
++    assert(NPALETTES == 9u && !strcmp(UI_PALETTES[0].name, "NIGHT") && !strcmp(UI_PALETTES[1].name, "DAY") &&
+            !strcmp(UI_PALETTES[2].name, "CONTRAST") && !strcmp(UI_PALETTES[3].name, "SUNSET") &&
+            !strcmp(UI_PALETTES[4].name, "OCEAN") && !strcmp(UI_PALETTES[5].name, "NEON") &&
+-           !strcmp(UI_PALETTES[6].name, "CANDY") && !strcmp(UI_PALETTES[7].name, "LO-FI") &&
++           !strcmp(UI_PALETTES[6].name, "CANDY") && !strcmp(UI_PALETTES[7].name, "LO-FI") && !strcmp(UI_PALETTES[8].name, "DUSK") &&
+            !strcmp(UI_PALETTES[UI_GRAY_INDEX].name, "GRAY"));
+     for (unsigned pt = 0; pt < UI_PAL_ENTRIES * 4u; pt++) {
+         unsigned p = pt / 4u, t = pt % 4u;
+diff --git a/tests/ui_render.c b/tests/ui_render.c
+index 407ba55..5a963c0 100644
+--- a/tests/ui_render.c
++++ b/tests/ui_render.c
+@@ -2354,7 +2354,7 @@ int main(int argc, char **argv)
+     const char *out = argc > 1 ? argv[1] : "build/ui_new";
+     char path[600];
+     uint32_t p, s;
+-    static const char *const SHOW[] = {"NIGHT", "DAY", "CONTRAST", "SUNSET", "OCEAN", "NEON", "CANDY", "LO-FI", "GRAY"};
++    static const char *const SHOW[] = {"NIGHT", "DAY", "CONTRAST", "SUNSET", "OCEAN", "NEON", "CANDY", "LO-FI", "DUSK", "GRAY"};
+     snprintf(path, sizeof path, "%s/report.txt", out);
+     rep = fopen(path, "w");
+     if (!rep) { fprintf(stderr, "cannot write %s\n", path); return 1; }
+diff --git a/tests/ui_test.c b/tests/ui_test.c
+index 3287a06..df18620 100644
+--- a/tests/ui_test.c
++++ b/tests/ui_test.c
+@@ -1745,7 +1745,7 @@ static int test_display_preferences(void)
+     {
+         int steps_ok = settings.palette == 2;
+         for (uint32_t k = 3; k < NPALETTES; k++) { turn(EN_K1, 1); steps_ok &= settings.palette == k; }
+-        bad += check("COLOR KNOB 1 steps on through SUNSET .. LO-FI, then wraps to NIGHT",
++        bad += check("COLOR KNOB 1 steps on through SUNSET .. DUSK, then wraps to NIGHT",
+                      steps_ok && (turn(EN_K1, 1), settings.palette == UI_DEFAULT_INDEX));
+     }
+     press(B_OCTDN);
+diff --git a/tests/upreset_test.c b/tests/upreset_test.c
+index f70868c..6d5f292 100644
+--- a/tests/upreset_test.c
++++ b/tests/upreset_test.c
+@@ -45,7 +45,7 @@ static int check(const char *what, int ok)
+  * values) in these slots. Only the note processors survive preset loading. */
+ static int16_t mapped_value(uint32_t id, int16_t value)
+ {
+-    if(id==P_FXTYPE || id==P_FX2TYPE || id==P_FX3TYPE)return FX_OFF;
++    if((id==P_FXTYPE || id==P_FX2TYPE || id==P_FX3TYPE) && fx_retired(value))return FX_OFF;
+     return value;
+ }
+ 
+@@ -289,7 +289,7 @@ int main(void)
+     bad += check("np == P_COUNT: as stored", ok);
+     up_set_value(&r,P_FXTYPE,FX_MIDIVERB);up_set_value(&r,P_FX2TYPE,FX_MIDIDELAY);up_set_value(&r,P_FX3TYPE,FX_CHORUS);
+     up_params(&r,v,def);
+-    bad += check("note FX survive, historical audio insert loads OFF",v[P_FXTYPE]==FX_MIDIVERB && v[P_FX2TYPE]==FX_MIDIDELAY && v[P_FX3TYPE]==FX_OFF);
++    bad += check("note FX and audio inserts survive",v[P_FXTYPE]==FX_MIDIVERB && v[P_FX2TYPE]==FX_MIDIDELAY && v[P_FX3TYPE]==FX_CHORUS);
+ 
+     {   /* steps -> pattern (UP_STORE) */
+         step_t st[NSTEP];
+diff --git a/tests/usb_audio_tracks_test.c b/tests/usb_audio_tracks_test.c
+index 27bb193..c8bc170 100644
+--- a/tests/usb_audio_tracks_test.c
++++ b/tests/usb_audio_tracks_test.c
+@@ -209,7 +209,7 @@ int main(void)
+     struct result insert = stereo_render(1, 0, 4096);
+     struct result wet = stereo_render(1, 1, 4096);
+     assert(dry.energy && dry.monitor && insert.energy && wet.energy);
+-    assert(dry.hash == insert.hash && insert.hash != wet.hash); /* historical track audio FX are inert */
++    assert(dry.hash != insert.hash && insert.hash != wet.hash); /* track audio inserts process the stems */
+     struct result muted = stereo_render(1, 1, 0), half = stereo_render(1, 1, 2048);
+     assert(muted.energy == 0 && half.energy < wet.energy);    /* MASTER sets the output, */
+     assert(muted.taken == wet.taken && half.taken == wet.taken);   /* never the recording (#103) */
+diff --git a/tests/voice_weights_felucca_test.c b/tests/voice_weights_felucca_test.c
+new file mode 100644
+index 0000000..05ea2a3
+--- /dev/null
++++ b/tests/voice_weights_felucca_test.c
+@@ -0,0 +1,70 @@
++/* SPDX-License-Identifier: GPL-3.0-only
++ * Copyright (C) 2026 Kerem Kilic (Ellic Studio) */
++/* GLO > WEIGHTS with the shipping engines (MELODEE_FELUCCA_ENGINES): P5 FM6 DRUM PHASE / LOFI VOICE TRIO WHEEL /
++ * PHYS BUDGET - GUARD; each weight reaches its engine's voices only; the version 2 record (nine nibbles) and a
++ * version 1 record's P5, FM6 and DRUM. */
++#define UI_TEST_NO_MAIN 1
++#include "ui_test.c"
++
++static const uint8_t kinds[VOICE_KINDS] = {ENGI_PROPHET, ENGI_FM6, ENGI_DRUM, 2u, 3u, 5u, 6u, 7u, 9u};
++static const char *const names[VOICE_KINDS] = {"P5", "FM6", "DRUM", "PHASE", "LOFI", "VOICE", "TRIO", "WHEEL", "PHYS"};
++static const char *value(const char *title, uint32_t k, int16_t **vp, const char **label)
++{
++    static char v[12]; const char *u;
++    go_title(title);
++    const param_desc_t *d = page_desc(cur_page(), k, vp);
++    if (!d || !*vp) { *label = ""; return ""; }
++    *label = d->label;
++    param_format(d, **vp, v, &u);
++    return v;
++}
++int main(void)
++{
++    int bad = 0, ok = 1;
++    _Static_assert(VOICE_KINDS == 9u, "the shipping engines' weights");
++    ui_power_on(); memset(settings_vpoints, 0, sizeof settings_vpoints);
++    for (uint32_t k = 0; k < VOICE_KINDS; k++) {
++        set_engine_of(&trk[0], kinds[k]); trk[0].engine = trk[0].eng_req;
++        uint32_t autov = voice_units(&trk[0]);
++        settings_vpoints[k] = 7;
++        ok &= voice_units(&trk[0]) == 7u;
++        settings_vpoints[k] = 0; settings_vpoints[(k + 1u) % VOICE_KINDS] = 9;
++        ok &= voice_units(&trk[0]) == autov;                  /* another engine's weight never applies */
++        settings_vpoints[(k + 1u) % VOICE_KINDS] = 0;
++    }
++    bad += check("each of the nine weights reaches its own engine's voices only; AUTO keeps the built-in rule", ok);
++
++    int16_t *vp; const char *label;
++    static const struct { const char *page; uint8_t col, kind; } at[VOICE_KINDS] = {
++        {"WEIGHTS", 0, 0}, {"WEIGHTS", 1, 1}, {"WEIGHTS", 2, 2}, {"WEIGHTS", 3, 3},
++        {"WEIGHTS 2", 0, 4}, {"WEIGHTS 2", 1, 5}, {"WEIGHTS 2", 2, 6}, {"WEIGHTS 2", 3, 7}, {"WEIGHTS 3", 0, 8}};
++    ok = 1;
++    for (uint32_t k = 0; k < VOICE_KINDS; k++)
++        ok &= str_eq(value(at[k].page, at[k].col, &vp, &label), "AUTO") && str_eq(label, names[at[k].kind]) &&
++              vp == &settings_vpoints[at[k].kind];
++    value("WEIGHTS 3", 1, &vp, &label); ok &= str_eq(label, "BUDGET") && vp == &settings_budget;
++    ok &= str_eq(value("WEIGHTS 3", 3, &vp, &label), "OFF") && str_eq(label, "GUARD") && vp == &settings_safety;
++    value("WEIGHTS 2", 2, &vp, &label); turn(EN_K3, 2); ok &= settings_vpoints[6] == 2;   /* TRIO */
++    for (uint32_t i = 0; i < NPAGES; i++)
++        for (uint32_t c = 0; c < 4; c++) if (str_eq(PAGES[i].title, "WEIGHTS") || str_eq(PAGES[i].title, "WEIGHTS 2"))
++            ok &= PAGES[i].id[c] == 0xFF || global_reserved(PAGES[i].id[c]) || PAGES[i].id[c] == G_BUDGET;
++    bad += check("WEIGHTS: P5 FM6 DRUM PHASE; 2: LOFI VOICE TRIO WHEEL; 3: PHYS BUDGET - GUARD; on reserved ids", ok);
++
++    persist_t p; memset(&p, 0, sizeof p);
++    static const int16_t custom[VOICE_KINDS] = {3, 0, 1, 15, 2, 9, 4, 6, 12};
++    memcpy(settings_vpoints, custom, sizeof custom); settings_safety = 0;
++    settings_export(&p);
++    const uint8_t *w = p.favorites.factory[8] + 8;
++    ok = w[0] == 'W' && w[1] == 2u && w[7] == 1u && settings_legacy_valid(&p);
++    memset(settings_vpoints, 0, sizeof settings_vpoints); settings_safety = 1;
++    ok &= settings_import(&p, (int)sizeof p) && !memcmp(settings_vpoints, custom, sizeof custom) && !settings_safety;
++    bad += check("version 2: nine weights as nibbles and GUARD survive export / import", ok);
++
++    persist_t q = p; uint8_t *v1 = q.favorites.factory[8] + 8;
++    memset(v1, 0, 8); v1[0] = 'W'; v1[1] = 1u; v1[2] = 5; v1[3] = 4; v1[4] = 3; v1[5] = 2; v1[6] = 1; v1[7] = 0;
++    ok = settings_import(&q, (int)sizeof q) && settings_vpoints[0] == 5 && settings_vpoints[1] == 3 && settings_vpoints[2] == 1 &&
++         !settings_vpoints[3] && !settings_vpoints[8] && settings_safety == 1;
++    bad += check("a version 1 record (P5 CZ-1 FM6 SID DRUM) keeps P5, FM6 and DRUM; the CZ-1 and SID points go", ok);
++    printf(bad ? "voice weights (shipping): %d FAILED\n" : "GLO > WEIGHTS, shipping engines: nine weights, three pages, v2 record and v1 migration: OK\n", bad);
++    return bad != 0;
++}
+diff --git a/tools/gen_ui_palettes.py b/tools/gen_ui_palettes.py
+index ce8ed35..4ecb8e7 100755
+--- a/tools/gen_ui_palettes.py
++++ b/tools/gen_ui_palettes.py
+@@ -6,7 +6,8 @@
+ 
+   gen_ui_palettes.py OUT.h [--report]
+ 
+-Melodee's palettes: NIGHT (the default: warm ink), DAY (light) and CONTRAST (black and white). A palette is BG
++Melodee's palettes: NIGHT (the default: warm ink), DAY (light), CONTRAST (black and white) and the others below; DUSK is
++CONTRAST with muted track colours (purple, pink, yellow, green). A palette is BG
+ (background), SURF (surface: cards, dialogs, menu rows), TEXT, ACCENT (the one active thing: hot knob, cursor,
+ playhead) and four track colours: the selected track's is THEME (values, curves, gauges, selection), so the screen
+ takes the colour of the track ALGORITHM picks (src/gfx.c palette_track). The firmware derives the rest with fixed
+@@ -47,6 +48,8 @@ PALETTES = [
+      ((150, 20, 102), (32, 64, 178), (0, 88, 90), (138, 54, 0))),
+     ("LO-FI",    (32, 28, 26),    (48, 42, 38),    (236, 226, 208), (250, 244, 232),
+      ((218, 140, 128), (214, 182, 104), (146, 184, 142), (142, 164, 206))),
++    ("DUSK",     (0, 0, 0),       (34, 34, 34),    (255, 255, 255), (255, 255, 255),   # CONTRAST, muted tracks:
++     ((178, 156, 226), (226, 156, 192), (220, 204, 132), (156, 204, 150))),           # purple, pink, yellow, green
+ ]
+ TEST_GRAY = ("GRAY", (14, 14, 14), (36, 36, 36), (204, 204, 204), (255, 255, 255),
+              ((232, 232, 232), (220, 220, 220), (208, 208, 208), (244, 244, 244)))
+diff --git a/web/editor.html b/web/editor.html
+index 0f5b945..9d96d81 100644
+--- a/web/editor.html
++++ b/web/editor.html
+@@ -2180,11 +2180,11 @@ function makeMockDevice(opt = {}) {
+     D("DEG", F.INT, 1, 12, 1));                      /* 83: QNT MPC, the degree of each bank's pad 02 */
+   TP.push(...["KICK","SNARE","CLAP","HATCL","HATOP","TOM","RIM","BELL"].map(n=>D(n,F.PCT,0,127,127)));
+   TP.push(E("SYNC", ["OFF","4BAR","2BAR","1/1","1/2","1/4","1/8","8T","1/16","16T","1/32"],0), E("TRIG",["NOTE","FREE"],0), E("POL",["BI","UNI"],0), D("SPRD",F.PCT,0,127,0));
+-  for(let slot=0;slot<3;slot++)TP.push(E("NOTE FX", ["OFF","","","","","","","","","","NOTE TAIL","NOTE ECHO","","","","","","","",""],0),D("MIX",F.PCT,0,127,0),D("RATE",F.LFOHZ,0,127,60),D("CHAR",F.PCT,0,127,64));
++  for(let slot=0;slot<3;slot++)TP.push(E("FX", ["OFF","PHASER","WIDTH","FORMANT","TAPE","SPIT","","ROOM","REVERB","CHORUS","NOTE TAIL","NOTE ECHO","DRIVE","DRIVE","DRIVE","DRIVE","CRUSH","FLANGER","PEDAL PHASER","PEDAL CHORUS","DELAY"],0),D("MIX",F.PCT,0,127,0),D("RATE",F.LFOHZ,0,127,60),D("CHAR",F.PCT,0,127,64));
+   TP.push(D("SEND",F.PCT,0,127,0),D("SEND 2",F.PCT,0,127,0),D("SEND 3",F.PCT,0,127,0));
+   for(let slot=0;slot<3;slot++)TP.push(D("TONE",F.TONE,-63,63,0));
+   TP.push(E("STRUM",["OFF","1/8","1/16","1/32","1/64","1/128","16T","32T"],0),E("STROKE",["DOWN","UP","ALT"],0));
+-  for(let slot=0;slot<3;slot++)GP.push(E("TYPE", ["OFF","PHASER","WIDTH","FORMANT","TAPE","SPIT","","ROOM","REVERB","CHORUS","","","DRIVE", "DRIVE", "DRIVE", "DRIVE", "CRUSH", "FLANGER", "PEDAL PHASER", "PEDAL CHORUS"],0),D("MIX",F.PCT,0,127,127),D("RATE",F.LFOHZ,0,127,60),D("CHAR",F.PCT,0,127,64));
++  for(let slot=0;slot<3;slot++)GP.push(E("TYPE", ["OFF","PHASER","WIDTH","FORMANT","TAPE","SPIT","","ROOM","REVERB","CHORUS","","","DRIVE", "DRIVE", "DRIVE", "DRIVE", "CRUSH", "FLANGER", "PEDAL PHASER", "PEDAL CHORUS", "DELAY"],0),D("MIX",F.PCT,0,127,127),D("RATE",F.LFOHZ,0,127,60),D("CHAR",F.PCT,0,127,64));
+   GP.push(D("RETURN",F.PCT,0,127,100),E("MODE",["CHAIN","SPLIT"],0),D("BUDGET",F.INT,8,32,16,null,"pts"));
+   for(let slot=0;slot<3;slot++)GP.push(D("TONE",F.TONE,-63,63,0));
+   const P_COUNT = 124, G_COUNT = 45, NSTEP = 64, P_E0 = 116, G_ENGSEL = 20, P_RESERVED45 = 45;
+diff --git a/web/manual/index.html b/web/manual/index.html
+index 3496836..dada935 100644
+--- a/web/manual/index.html
++++ b/web/manual/index.html
+@@ -677,14 +677,14 @@
+ 
+       <section id="effects">
+         <h2>Effects</h2>
+-        <p>Press <kbd>FX</kbd> to open the selected track’s rack: three note-effect slots for NOTE TAIL and NOTE ECHO, followed by a Shared row. Audio processors run in SHARED; each track sends audio to that shared rack. Effects save with the project and template. Loading a sound, changing the engine, Init sound and sound undo leave them in place.</p>
++        <p>Every effect sits in one of two racks, routed as in Araminta’s EFFECTS list: <strong>CHAIN</strong> on a track, <strong>SEND</strong> or <strong>MASTER</strong> in the shared rack. Press <kbd>FX</kbd> to open the selected track’s rack: three insert slots that run in series, then a Shared row. A slot holds any audio effect or a note effect (NOTE TAIL, NOTE ECHO). Effects, USE and routing save with the project and template; changing a sound keeps them.</p>
+         <div class="shots">
+-          <figure class="shot"><img src="fx_rack.png" alt="Track effects rack" width="240" height="240"><figcaption>FX: note-effect slots and the Shared row.</figcaption></figure>
+-          <figure class="shot"><img src="fx_shared.png" alt="Shared effects rack" width="240" height="240"><figcaption>SHARED: slots A–C, ROUTE and RETURN.</figcaption></figure>
++          <figure class="shot"><img src="fx_rack.png" alt="Track effects rack" width="240" height="240"><figcaption>FX: three insert slots and the Shared row.</figcaption></figure>
++          <figure class="shot"><img src="fx_shared.png" alt="Shared effects rack" width="240" height="240"><figcaption>SHARED: slots A–C (each SEND or MASTER) and RETURN.</figcaption></figure>
+           <figure class="shot"><img src="fx_tone_dark.png" alt="Effect tone filter set to dark" width="240" height="240"><figcaption>TONE: the lit band reaches the effect.</figcaption></figure>
+         </div>
+-        <p>On the rack, <kbd>KNOB 2</kbd> picks a row, <kbd>KNOB 1</kbd> chooses its effect, and <kbd>KNOB 4</kbd> sets its amount (NOTE TAIL’s REL, NOTE ECHO’s LEVEL, or the track’s SEND on the Shared row in CHAIN mode). Empty slots show <strong>--</strong>. <kbd>OCT+</kbd> opens the selected slot, its effect picker if empty, or the SHARED rack. <kbd>SELECT</kbd> visits the racks and occupied slots; empty slot pages are skipped. Pressing <kbd>FX</kbd> from a slot returns to its rack.</p>
+-        <p>The shared audio-effect picker groups choices into Space, Motion, Dirt and Colour. Track slots offer only note effects. On an empty shared slot, <kbd>OCT+</kbd> opens the browser: <kbd>KNOB 1</kbd> picks a family, <kbd>KNOB 2</kbd> an effect, and <kbd>OCT+</kbd> confirms. On a shared audio slot’s page, <kbd>KNOB 1</kbd> is MIX, <kbd>KNOB 2</kbd> is RATE / TIME / SIZE / DRIVE / BITS, and <kbd>KNOB 3</kbd> shapes its character. <kbd>KNOB 4</kbd> is TONE for ROOM and REVERB, SHAPE for DRIVE, or RESO for the swept pedals:</p>
++        <p>On a track’s rack, <kbd>KNOB 2</kbd> picks a row, <kbd>KNOB 1</kbd> chooses its effect, <kbd>KNOB 3</kbd> sets its <strong>ORDER</strong> (1st, 2nd, 3rd: the effect moves with all its controls, and the row follows), and <kbd>KNOB 4</kbd> sets its amount (MIX, NOTE TAIL’s REL, NOTE ECHO’s LEVEL, or the track’s SEND on the Shared row). Empty slots show <strong>--</strong>. <kbd>OCT+</kbd> opens the selected slot, its effect browser if empty, or the shared rack.</p>
++        <p>The effect picker groups choices into Space, Motion, Dirt and Colour (a track’s slots add Notes). On an empty slot, <kbd>OCT+</kbd> opens the browser: <kbd>KNOB 1</kbd> picks a family, <kbd>KNOB 2</kbd> an effect, and <kbd>OCT+</kbd> confirms. REVERB and DELAY run once each: choosing one in any slot, on any track or in SHARED, turns it off where it was.</p>
+         <table>
+           <thead><tr><th>Effect</th><th><kbd>KNOB 2</kbd></th><th><kbd>KNOB 3</kbd></th></tr></thead>
+           <tbody>
+@@ -695,6 +695,7 @@
+             <tr><td>SPIT</td><td>RATE</td><td>BITE — a resonant band that jumps and saturates.</td></tr>
+             <tr><td>ROOM</td><td>SIZE</td><td>DECAY — a small space.</td></tr>
+             <tr><td>REVERB</td><td>SIZE</td><td>DAMP — SLOOP’s stereo reverb; TONE shapes its input.</td></tr>
++            <tr><td>DELAY</td><td>TIME</td><td>FDBK — a tempo-synced delay: TIME 1/32 … 1/2 of the beat (halved until it fits its 0.74 s), FDBK the repeats, TONE its input; each repeat a little darker.</td></tr>
+             <tr><td>DRIVE</td><td>DRIVE</td><td>TONE, and SHAPE on KNOB 4: Soft, Hard, Fold or Fuzz — SLOOP drive processors, unity output gain.</td></tr>
+             <tr><td>CRUSH</td><td>BITS</td><td>ALIAS — bit reduction and sample hold (the held rate in kHz).</td></tr>
+             <tr><td>FLANGER / PEDAL PHASER / PEDAL CHORUS</td><td>RATE</td><td>DEPTH and signed RESO — feedback pedals; shared returns exclude their dry half.</td></tr>
+@@ -708,12 +709,12 @@
+         <p>Hold <kbd>FX</kbd> and press a key to apply one of SLOOP’s 27 audio effects to the whole stereo master, including shared returns and USB stereo capture. Release the effect key for dry audio. Double-tap FX to lock the layer and tap again to close. KNOB 1 browses the key reference. Keys held before FX keep playing; effect keys produce no notes or MIDI.</p>
+         <p>The effects include loops, reverse, tape stop, half speed, filter sweeps, phone, crush, alias, gate, echo, wobble, band kills, rewind, octave up, flanger, auto-pan, freeze, mono and fade. FREEZE uses SLOOP Reverb to hold 186 ms of captured master audio. The optional punch history uses 32 KiB while the layer is in use (372 ms of mono history; replay spans up to 348 ms); hold FX briefly before reverse/rewind. If memory is unavailable the header shows FX MEMORY; close FX, reduce effect memory use and reopen to retry.</p>
+         <h3>Shared return</h3>
+-        <p>The Shared row feeds one shared three-slot return after this track’s level and pan. In the <strong>SHARED</strong> rack, <kbd>KNOB 2</kbd> selects slots A–C or RETURN, <kbd>KNOB 1</kbd> chooses a slot’s effect, <kbd>KNOB 3</kbd> sets <strong>ROUTE</strong>, and <kbd>KNOB 4</kbd> sets the selected amount. <kbd>OCT+</kbd> opens a slot. Hold <kbd>OCT+</kbd>, or tap it on RETURN, for Routing and Clear shared FX (asks first).</p>
++        <p>The Shared row feeds the shared rack after this track’s level and pan. In the <strong>SHARED</strong> rack, <kbd>KNOB 2</kbd> selects slots A–C or RETURN and <kbd>KNOB 1</kbd> chooses a slot’s effect. <kbd>KNOB 3</kbd> on a slot sets its <strong>USE</strong>: <strong>SEND</strong> (fed by the tracks’ SEND, mixed back at RETURN) or <strong>MASTER</strong> (the whole mix runs through it, after the returns and before the punch effects and MASTER volume; <kbd>KNOB 4</kbd> its MIX, dry to wet). A MASTER slot shows MASTER on its row, and a track’s Shared row lists only the slots its SEND reaches. <kbd>KNOB 3</kbd> on RETURN sets <strong>ROUTE</strong>:</p>
+         <ul>
+           <li><strong>CHAIN</strong> (default) — raise the selected track’s SEND on FX’s Shared row. Slots A–C run in series. On SHARED, <kbd>KNOB 4</kbd> sets each slot’s MIX, initially fully wet, or the overall RETURN.</li>
+           <li><strong>SPLIT</strong> — each shared slot has its own send. On SHARED, <kbd>KNOB 4</kbd> sets this track’s SEND to the selected slot, or RETURN on the last row. Each slot’s return joins the dry output. SEND 2 and SEND 3 are remembered when you go back to CHAIN. Shared slot pages still edit their MIX.</li>
+         </ul>
+-        <p>Only one shared REVERB can be active: choosing it in another shared slot moves it there; imported duplicate REVERB slots keep the first. Historical per-track audio processors load OFF and are not moved automatically. Recreate those processors in SHARED and set the track sends. NOTE TAIL and NOTE ECHO remain per-track. Existing shared settings keep their supported compatibility paths; older firmware may not reproduce the new routing.</p>
++        <p>Older projects’ per-track audio effects load again into their track slots. A project that uses MASTER or DELAY does not load on earlier firmware.</p>
+       </section>
+ 
+       <section id="scales">
+@@ -932,7 +933,7 @@
+             <tr><td>MIXER</td><td><kbd>KNOB 1</kbd> LEVEL, <kbd>KNOB 2</kbd> PAN, <kbd>KNOB 4</kbd> MUTE for the selected track. Sends live on the effect pages.</td></tr>
+             <tr><td>GLOBAL</td><td><kbd>KNOB 1</kbd> A4 concert pitch (<strong>400–480&nbsp;Hz</strong>, default 440), <kbd>KNOB 2</kbd> <strong>BUDGET</strong> budget for CPU resources (8–32 points, default 18; see <a href="#tracks">Tracks</a>), <kbd>KNOB 3</kbd> CLK (INT / USB / TRS / BLE; see <a href="#midi-clock">Clock and transport</a>), <kbd>KNOB 4</kbd> TUNE (fine cents, ±50). A4, BUDGET and CLK are device settings: they survive power-off and stay when you load a project. TUNE, and SYSTEM’s MIDI and ROUT, come back at power-on, but a project or template brings its own.</td></tr>
+             <tr><td>SYSTEM</td><td>MIDI (the input MIDI tracks listen to: USB, TRS or BLE; instrument tracks accept every input), DRUM channel (OFF or 1–16, default 10), ROUT (<strong>CH1-4</strong>, <strong>SEL</strong>, <strong>CH5-8</strong>, <strong>CH9-12</strong> or <strong>CH13-16</strong>), and CPU info. <kbd>KNOB 1</kbd> also shows receive activity. See <a href="#midi">MIDI</a>.</td></tr>
+-            <tr><td>WEIGHTS, WEIGHTS 2</td><td>Budget points per sounding voice for P5, FM6 and DRUM (the CZ-1 and SID rows only act in firmware built with those engines): <strong>AUTO</strong> (default, the rule under <a href="#tracks">Tracks</a>) or a number. A higher number lets fewer voices of that engine start. WEIGHTS 2 also has BUDGET and <strong>GUARD</strong>: ON lets an audio overload cut releasing voices. With OFF (default) the audio may glitch instead, and an overload that lasts several seconds can freeze the panel and restart the FM-1. Device settings; they survive power-off and stay when you load a project.</td></tr>
++            <tr><td>WEIGHTS, WEIGHTS 2, WEIGHTS 3</td><td>Budget points per sounding voice for P5, FM6, DRUM, PHASE, LOFI, VOICE, TRIO, WHEEL and PHYS: <strong>AUTO</strong> (default, the rule under <a href="#tracks">Tracks</a>) or a number. A higher number lets fewer voices of that engine start. WEIGHTS 3 also has BUDGET and <strong>GUARD</strong>: ON lets an audio overload cut releasing voices. With OFF (default) the audio may glitch instead, and an overload that lasts several seconds can freeze the panel and restart the FM-1. Device settings; they survive power-off and stay when you load a project.</td></tr>
+           </tbody>
+         </table>
+       </section>
+@@ -950,7 +951,7 @@
+         <table>
+           <thead><tr><th>Item</th><th>What it does</th></tr></thead>
+           <tbody>
+-            <tr><td>COLOR</td><td><strong>NIGHT</strong> (default), <strong>DAY</strong>, <strong>CONTRAST</strong>, <strong>SUNSET</strong>, <strong>OCEAN</strong>, <strong>NEON</strong>, <strong>CANDY</strong> or <strong>LO-FI</strong>. Knob 1 uses the selected track’s color; the other three knobs are shades of it. Remembered.</td></tr>
++            <tr><td>COLOR</td><td><strong>NIGHT</strong> (default), <strong>DAY</strong>, <strong>CONTRAST</strong>, <strong>SUNSET</strong>, <strong>OCEAN</strong>, <strong>NEON</strong>, <strong>CANDY</strong>, <strong>LO-FI</strong> or <strong>DUSK</strong> (CONTRAST with muted track colors: purple, pink, yellow, green). Knob 1 uses the selected track’s color; the other three knobs are shades of it. Remembered.</td></tr>
+             <tr><td>FONT</td><td><strong>RUBIK</strong> (default) or <strong>PIXEL</strong> (Melodee Pixel, a block face). Pages keep the same layout in either. Remembered.</td></tr>
+             <tr><td>HOLD</td><td>The duration of a long hold of a button or knob (0.3–0.6&nbsp;s) to pull up an additional menu or action.</td></tr>
+             <tr><td>LIGHTS</td><td>Idle indicator brightness, OFF (only pressed / engaged / selectable) through FULL.</td></tr>
+diff --git a/web/test_web.mjs b/web/test_web.mjs
+index 9a1f299..db4efe5 100644
+--- a/web/test_web.mjs
++++ b/web/test_web.mjs
+@@ -681,17 +681,22 @@ async function trackEffects() {
+     const dump=E.parse[E.CMD.DUMP](await rq(E.req.dump()),info);
+     ok(eq(dump.p.slice(96,108),fx),"FX: factory, user and librarian sound loads preserve all three track slots");
+     ok(eq(dump.p.slice(111,114),[24,-21,-22]),"FX: sound loads preserve TONE");
+-    for (const retired of [1,6,7,8,9,12,13,14,15,16,17,18,19]) {
++    for (const retired of [6]) {                         /* (track slots take audio inserts again: only ECHO is retired) */
+       for (const id of [96,100,104]) await rq(E.req.set(0,id,retired));
+       const retiredDump=E.parse[E.CMD.DUMP](await rq(E.req.dump()),info);
+       ok([96,100,104].every(id=>retiredDump.p[id]===0),`FX: retired type ${retired} maps to OFF in all track slots`);
+     }
++    for (const kept of [1,7,8,9,12,16,17,18,19,20]) {
++      for (const id of [96,100,104]) await rq(E.req.set(0,id,kept));
++      const keptDump=E.parse[E.CMD.DUMP](await rq(E.req.dump()),info);
++      ok([96,100,104].every(id=>keptDump.p[id]===kept),`FX: audio insert type ${kept} stays in all track slots`);
++    }
+     ok(eq(E.fmtValue({fmt:E.F.TONE},0),["Full",""]) && eq(E.fmtValue({fmt:E.F.TONE},24),["Thin 313","Hz"]) && eq(E.fmtValue({fmt:E.F.TONE},-39),["Dark 516","Hz"]) &&
+        eq(E.fmtValue({fmt:E.F.TONE},63),["Thin 1280","Hz"]) && eq(E.fmtValue({fmt:E.F.TONE},1),["Thin 150","Hz"]) && eq(E.fmtValue({fmt:E.F.TONE},-63),["Dark 120","Hz"]),"FX: TONE formats Full, Dark / Thin and the cut's frequency");
+     for (const scope of [1]) {
+       const base=scope===0?96:27,third=scope===0?111:42;
+       const typeDesc=E.parse[E.CMD.DESC](await rq(E.req.desc(scope,base)));
+-      ok(typeDesc.max===19 && (scope===0 || (!typeDesc.names[10] && !typeDesc.names[11])),"FX: new types retain MIDI-only slots in the shared rack enum");
++      ok(typeDesc.max===20 && typeDesc.names[20]==="DELAY" && (scope===0 || (!typeDesc.names[10] && !typeDesc.names[11])),"FX: new types retain MIDI-only slots in the shared rack enum");
+       ok(eq([12,13,14,15].map(v=>E.fmtValue(typeDesc,v)[0]),["DRIVE · SOFT","DRIVE · HARD","DRIVE · FOLD","DRIVE · FUZZ"]),"FX: every stored DRIVE shape has a distinct editor choice");
+       for (const [type,a,b,fmt] of [[8,"SIZE","DAMP",E.F.PCT],[12,"DRIVE","TONE",E.F.PCT],[16,"BITS","ALIAS",E.F.BITS],[17,"RATE","DEPTH",E.F.LFOHZ],[18,"RATE","DEPTH",E.F.LFOHZ],[19,"RATE","DEPTH",E.F.LFOHZ]]) {
+         await rq(E.req.set(scope,base,type));
+-- 
+2.43.0
+
