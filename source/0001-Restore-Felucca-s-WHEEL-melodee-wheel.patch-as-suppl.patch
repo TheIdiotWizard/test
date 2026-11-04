@@ -1,7 +1,7 @@
 From 155cbf8a90f692029f9e407982151136a95eef7f Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Tue, 3 Nov 2026 14:27:31 +0000
-Subject: [PATCH 1/6] Restore Felucca's WHEEL (melodee-wheel.patch as supplied)
+Subject: [PATCH 1/8] Restore Felucca's WHEEL (melodee-wheel.patch as supplied)
 
 ---
  README.md                      |  8 +++++++-

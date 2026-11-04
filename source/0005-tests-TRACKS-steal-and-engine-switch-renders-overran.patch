@@ -1,7 +1,7 @@
 From 78afd1a10d211544f2c05d687d3251cd3cb3e416 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Wed, 4 Nov 2026 14:48:40 +0000
-Subject: [PATCH 5/6] tests: TRACKS' steal and engine-switch renders overran
+Subject: [PATCH 5/8] tests: TRACKS' steal and engine-switch renders overran
  their buffers
 
 steal_test and xfade_test render 4 s (176,400 samples) in 32-sample blocks; 176,400 is not a

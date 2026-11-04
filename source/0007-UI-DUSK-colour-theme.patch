@@ -1,0 +1,115 @@
+From 635525e9b0aa61a7426ff6066767c816a274885d Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 4 Nov 2026 22:21:19 +0000
+Subject: [PATCH 7/8] UI: DUSK colour theme
+
+CONTRAST's base with muted track colours that move from purple and
+pink to yellow and green: (178,156,226), (226,156,192), (220,204,132),
+(156,204,150). It follows LO-FI in the COLOR list.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_0131vpfZVN4vprBnQkpmn5yn
+---
+ README.md                | 2 +-
+ tests/theme_test.c       | 4 ++--
+ tests/ui_render.c        | 2 +-
+ tests/ui_test.c          | 2 +-
+ tools/gen_ui_palettes.py | 5 ++++-
+ web/manual/index.html    | 2 +-
+ 6 files changed, 10 insertions(+), 7 deletions(-)
+
+diff --git a/README.md b/README.md
+index 926641b..8666490 100644
+--- a/README.md
++++ b/README.md
+@@ -552,7 +552,7 @@ user presets saved by earlier Melodee versions are not imported, and the user sa
+   RECENT, with knob acceleration; factory presets, 384 shared user slots and 32 projects, named on the device, in one
+   storage pool; a startup project and a template for new projects; projects from Melodee 1.0 or later load
+ - **Screen:** Melodee's own look: Rubik type, icons drawn for Melodee, every track in its own colour (the screen takes the
+-  selected track's, each knob a shade of it), eight palettes: NIGHT, DAY, CONTRAST, SUNSET, OCEAN, NEON, CANDY and LO-FI
++  selected track's, each knob a shade of it), nine palettes: NIGHT, DAY, CONTRAST, SUNSET, OCEAN, NEON, CANDY, LO-FI and DUSK
+ - **Stage (HOME):** the selected track's own four knobs (its engine's: the Prophet's cutoff, resonance, filter envelope
+   and release, the CZ-1's wave, DCW, detune and vibrato), the notes and chord it plays in front of the live waveform
+   (the last voicing stays after release; a DRUM track lights its lanes as they hit), and a lane per track: its sound,
+diff --git a/tests/theme_test.c b/tests/theme_test.c
+index 72c0e4c..5a9c4e9 100644
+--- a/tests/theme_test.c
++++ b/tests/theme_test.c
+@@ -46,10 +46,10 @@ int main(int argc, char **argv)
+     static const uint8_t pd[] = {0x08, 0xf0};
+     const aafont_t probe = {1, 1, 'A', 'A', 0, 0, pg, pd, 0, 0, 0};
+     double worst = 100;
+-    assert(NPALETTES == 8u && !strcmp(UI_PALETTES[0].name, "NIGHT") && !strcmp(UI_PALETTES[1].name, "DAY") &&
++    assert(NPALETTES == 9u && !strcmp(UI_PALETTES[0].name, "NIGHT") && !strcmp(UI_PALETTES[1].name, "DAY") &&
+            !strcmp(UI_PALETTES[2].name, "CONTRAST") && !strcmp(UI_PALETTES[3].name, "SUNSET") &&
+            !strcmp(UI_PALETTES[4].name, "OCEAN") && !strcmp(UI_PALETTES[5].name, "NEON") &&
+-           !strcmp(UI_PALETTES[6].name, "CANDY") && !strcmp(UI_PALETTES[7].name, "LO-FI") &&
++           !strcmp(UI_PALETTES[6].name, "CANDY") && !strcmp(UI_PALETTES[7].name, "LO-FI") && !strcmp(UI_PALETTES[8].name, "DUSK") &&
+            !strcmp(UI_PALETTES[UI_GRAY_INDEX].name, "GRAY"));
+     for (unsigned pt = 0; pt < UI_PAL_ENTRIES * 4u; pt++) {
+         unsigned p = pt / 4u, t = pt % 4u;
+diff --git a/tests/ui_render.c b/tests/ui_render.c
+index 407ba55..5a963c0 100644
+--- a/tests/ui_render.c
++++ b/tests/ui_render.c
+@@ -2354,7 +2354,7 @@ int main(int argc, char **argv)
+     const char *out = argc > 1 ? argv[1] : "build/ui_new";
+     char path[600];
+     uint32_t p, s;
+-    static const char *const SHOW[] = {"NIGHT", "DAY", "CONTRAST", "SUNSET", "OCEAN", "NEON", "CANDY", "LO-FI", "GRAY"};
++    static const char *const SHOW[] = {"NIGHT", "DAY", "CONTRAST", "SUNSET", "OCEAN", "NEON", "CANDY", "LO-FI", "DUSK", "GRAY"};
+     snprintf(path, sizeof path, "%s/report.txt", out);
+     rep = fopen(path, "w");
+     if (!rep) { fprintf(stderr, "cannot write %s\n", path); return 1; }
+diff --git a/tests/ui_test.c b/tests/ui_test.c
+index 3287a06..df18620 100644
+--- a/tests/ui_test.c
++++ b/tests/ui_test.c
+@@ -1745,7 +1745,7 @@ static int test_display_preferences(void)
+     {
+         int steps_ok = settings.palette == 2;
+         for (uint32_t k = 3; k < NPALETTES; k++) { turn(EN_K1, 1); steps_ok &= settings.palette == k; }
+-        bad += check("COLOR KNOB 1 steps on through SUNSET .. LO-FI, then wraps to NIGHT",
++        bad += check("COLOR KNOB 1 steps on through SUNSET .. DUSK, then wraps to NIGHT",
+                      steps_ok && (turn(EN_K1, 1), settings.palette == UI_DEFAULT_INDEX));
+     }
+     press(B_OCTDN);
+diff --git a/tools/gen_ui_palettes.py b/tools/gen_ui_palettes.py
+index ce8ed35..4ecb8e7 100755
+--- a/tools/gen_ui_palettes.py
++++ b/tools/gen_ui_palettes.py
+@@ -6,7 +6,8 @@
+ 
+   gen_ui_palettes.py OUT.h [--report]
+ 
+-Melodee's palettes: NIGHT (the default: warm ink), DAY (light) and CONTRAST (black and white). A palette is BG
++Melodee's palettes: NIGHT (the default: warm ink), DAY (light), CONTRAST (black and white) and the others below; DUSK is
++CONTRAST with muted track colours (purple, pink, yellow, green). A palette is BG
+ (background), SURF (surface: cards, dialogs, menu rows), TEXT, ACCENT (the one active thing: hot knob, cursor,
+ playhead) and four track colours: the selected track's is THEME (values, curves, gauges, selection), so the screen
+ takes the colour of the track ALGORITHM picks (src/gfx.c palette_track). The firmware derives the rest with fixed
+@@ -47,6 +48,8 @@ PALETTES = [
+      ((150, 20, 102), (32, 64, 178), (0, 88, 90), (138, 54, 0))),
+     ("LO-FI",    (32, 28, 26),    (48, 42, 38),    (236, 226, 208), (250, 244, 232),
+      ((218, 140, 128), (214, 182, 104), (146, 184, 142), (142, 164, 206))),
++    ("DUSK",     (0, 0, 0),       (34, 34, 34),    (255, 255, 255), (255, 255, 255),   # CONTRAST, muted tracks:
++     ((178, 156, 226), (226, 156, 192), (220, 204, 132), (156, 204, 150))),           # purple, pink, yellow, green
+ ]
+ TEST_GRAY = ("GRAY", (14, 14, 14), (36, 36, 36), (204, 204, 204), (255, 255, 255),
+              ((232, 232, 232), (220, 220, 220), (208, 208, 208), (244, 244, 244)))
+diff --git a/web/manual/index.html b/web/manual/index.html
+index 578070e..046e38e 100644
+--- a/web/manual/index.html
++++ b/web/manual/index.html
+@@ -950,7 +950,7 @@
+         <table>
+           <thead><tr><th>Item</th><th>What it does</th></tr></thead>
+           <tbody>
+-            <tr><td>COLOR</td><td><strong>NIGHT</strong> (default), <strong>DAY</strong>, <strong>CONTRAST</strong>, <strong>SUNSET</strong>, <strong>OCEAN</strong>, <strong>NEON</strong>, <strong>CANDY</strong> or <strong>LO-FI</strong>. Knob 1 uses the selected track’s color; the other three knobs are shades of it. Remembered.</td></tr>
++            <tr><td>COLOR</td><td><strong>NIGHT</strong> (default), <strong>DAY</strong>, <strong>CONTRAST</strong>, <strong>SUNSET</strong>, <strong>OCEAN</strong>, <strong>NEON</strong>, <strong>CANDY</strong>, <strong>LO-FI</strong> or <strong>DUSK</strong> (CONTRAST with muted purple, pink, yellow and green tracks). Knob 1 uses the selected track’s color; the other three knobs are shades of it. Remembered.</td></tr>
+             <tr><td>FONT</td><td><strong>RUBIK</strong> (default) or <strong>PIXEL</strong> (Melodee Pixel, a block face). Pages keep the same layout in either. Remembered.</td></tr>
+             <tr><td>HOLD</td><td>The duration of a long hold of a button or knob (0.3–0.6&nbsp;s) to pull up an additional menu or action.</td></tr>
+             <tr><td>LIGHTS</td><td>Idle indicator brightness, OFF (only pressed / engaged / selectable) through FULL.</td></tr>
+-- 
+2.43.0
+

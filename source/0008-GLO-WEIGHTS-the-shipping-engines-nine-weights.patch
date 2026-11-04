@@ -1,0 +1,313 @@
+From 8be4a2db114910f5fc3cb92d912704b7887ec9cc Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 4 Nov 2026 22:21:29 +0000
+Subject: [PATCH 8/8] GLO WEIGHTS: the shipping engines' nine weights
+
+With MELODEE_FELUCCA_ENGINES (the default), GLO > WEIGHTS sets points
+for P5, FM6, DRUM, PHASE / LOFI, VOICE, TRIO, WHEEL / PHYS, BUDGET,
+GUARD on three pages; the CZ-1 and SID rows are gone. The device record
+(favorites row 8) becomes version 2, nine nibbles; a version 1 record
+keeps its P5, FM6 and DRUM. Builds with CZ-1 and SID keep the old pages.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_0131vpfZVN4vprBnQkpmn5yn
+---
+ README.md                          |  4 +-
+ firmware/src/core.h                |  7 +++
+ firmware/src/params.c              | 38 +++++++++++++---
+ firmware/src/settings_persist.c    | 23 +++++++++-
+ firmware/src/ui_input.c            |  2 +-
+ firmware/src/voice.c               |  5 +++
+ tests/run_tests.sh                 |  1 +
+ tests/voice_weights_felucca_test.c | 70 ++++++++++++++++++++++++++++++
+ web/manual/index.html              |  2 +-
+ 9 files changed, 140 insertions(+), 12 deletions(-)
+ create mode 100644 tests/voice_weights_felucca_test.c
+
+diff --git a/README.md b/README.md
+index 8666490..68e4f02 100644
+--- a/README.md
++++ b/README.md
+@@ -657,8 +657,8 @@ Thanks to [@aroum](https://github.com/aroum) for the detailed feedback in
+   the project's, saved and loaded with it (power-on: the BOOT project's, the template's or 120);
+   on GLO > GLOBAL, A4, BUDGET and CLK are the device's and stay when you load a project, while TUNE, and SYSTEM's
+   MIDI and ROUT, come back at power-on but follow the project or template you load
+-- **GLO > WEIGHTS** sets how many BUDGET points one voice of **P5** (Prophet), **CZ-1**, **FM6** and **SID** costs;
+-  **WEIGHTS 2** has **DRUM**, **BUDGET** and **GUARD**. AUTO keeps the built-in cost; 1–15 replaces it, so a
++- **GLO > WEIGHTS** sets how many BUDGET points one voice of **P5** (Prophet), **FM6**, **DRUM** and **PHASE** costs;
++  **WEIGHTS 2** has **LOFI**, **VOICE**, **TRIO** and **WHEEL**; **WEIGHTS 3** has **PHYS**, **BUDGET** and **GUARD**. AUTO keeps the built-in cost; 1–15 replaces it, so a
+   heavier weight lets fewer voices of that engine start. **GUARD ON** lets an audio overload cut releasing voices. With
+   **OFF** (default) the audio may glitch instead, and an overload that lasts several seconds can freeze the panel and
+   restart the FM-1. Device settings, kept across projects
+diff --git a/firmware/src/core.h b/firmware/src/core.h
+index 24b7513..fcb02f9 100644
+--- a/firmware/src/core.h
++++ b/firmware/src/core.h
+@@ -256,6 +256,13 @@ static int param_master_fx(uint32_t id){return id>=G_MFXTYPE && id<=G_MFX3CHAR;}
+ #define G_WSID G_RESERVED7
+ #define G_WDRUM G_RESERVED8
+ #define G_SAFETY G_RESERVED9
++/* the shipping engines' weights (MELODEE_FELUCCA_ENGINES): PHASE on CZ-1's id, LOFI on SID's, the rest on spare ones */
++#define G_WPHASE G_RESERVED5
++#define G_WLOFI G_RESERVED7
++#define G_WVOICE G_RESERVED10
++#define G_WTRIO G_RESERVED11
++#define G_WWHEEL G_RESERVED24
++#define G_WPHYS G_RESERVED26
+ #define G_DRREV G_RESERVED26
+ 
+ static int param_reserved(uint32_t id)
+diff --git a/firmware/src/params.c b/firmware/src/params.c
+index 5230468..bafb41a 100644
+--- a/firmware/src/params.c
++++ b/firmware/src/params.c
+@@ -89,8 +89,20 @@ static int16_t drumch_cell;
+ static uint8_t settings_boot;
+ static int16_t settings_budget = VOICE_BUDGET_DEFAULT;
+ /* GLO > WEIGHTS: budget points per sounding voice of PROPHET, CZ-1, FM6, SID and DRUM (0 AUTO: voice.c's
+- * built-in rule) and SAFETY (0: overload never cuts voices, audio.c). Device settings (settings_persist.c). */
+-#define VOICE_KINDS 5u
++ * built-in rule) and SAFETY (0: overload never cuts voices, audio.c). Device settings (settings_persist.c).
++ * MELODEE_FELUCCA_ENGINES: PROPHET, FM6, DRUM, PHASE, LOFI, VOICE, TRIO, WHEEL and PHYS (voice.c voice_kind) */
++#define VOICE_KINDS (MELODEE_FELUCCA_ENGINES ? 9u : 5u)
++/* a WEIGHTS page id's kind (settings_vpoints index), -1 none (GUARD: G_SAFETY) */
++static int weight_kind(uint32_t id)
++{
++#if MELODEE_FELUCCA_ENGINES
++    static const uint8_t ids[9] = {G_WP5, G_WFM6, G_WDRUM, G_WPHASE, G_WLOFI, G_WVOICE, G_WTRIO, G_WWHEEL, G_WPHYS};
++    for (int k = 0; k < 9; k++) if (ids[k] == id) return k;
++    return -1;
++#else
++    return id >= G_WP5 && id <= G_WDRUM ? (int)(id - G_WP5) : -1;
++#endif
++}
+ static int16_t settings_vpoints[VOICE_KINDS];
+ static int16_t settings_safety;
+ /* Device recording preferences: defaults preserve existing behavior. */
+@@ -701,8 +713,14 @@ static const page_t PAGES[] = {
+     {"VOICE 3", FAM_EDIT, SC_TRACK, GR_NONE, {P_SPRD, 0xFF, 0xFF, 0xFF}},
+     {"GLOBAL", FAM_GLO, SC_GLOBAL, GR_NONE, {G_A4, G_BUDGET, G_CLOCK, G_TUNE}}, /* device reference/budget; CLK/TUNE kept */
+     {"SYSTEM", FAM_GLO, SC_GLOBAL, GR_NONE, {G_MIDI, G_DRUMCH, G_ROUTE, G_INFO}},
++#if MELODEE_FELUCCA_ENGINES
++    {"WEIGHTS", FAM_GLO, SC_GLOBAL, GR_NONE, {G_WP5, G_WFM6, G_WDRUM, G_WPHASE}},   /* budget points per voice */
++    {"WEIGHTS 2", FAM_GLO, SC_GLOBAL, GR_NONE, {G_WLOFI, G_WVOICE, G_WTRIO, G_WWHEEL}},
++    {"WEIGHTS 3", FAM_GLO, SC_GLOBAL, GR_NONE, {G_WPHYS, G_BUDGET, 0xFF, G_SAFETY}},  /* SAFETY: overload voice cuts */
++#else
+     {"WEIGHTS", FAM_GLO, SC_GLOBAL, GR_NONE, {G_WP5, G_WCZ, G_WFM6, G_WSID}},        /* budget points per voice */
+     {"WEIGHTS 2", FAM_GLO, SC_GLOBAL, GR_NONE, {G_WDRUM, G_BUDGET, 0xFF, G_SAFETY}},  /* SAFETY: overload voice cuts */
++#endif
+     {"PRESETS", FAM_SAVE, SC_GLOBAL, GR_BROWSE, {0xFF, 0xFF, 0xFF, 0xFF}},   /* browser: KNOB 1 LIST, 2 / PRESETS the sounds */
+     {"USER", FAM_SAVE, SC_GLOBAL, GR_USER, {0xFF, 0xFF, 0xFF, 0xFF}},       /* user presets: SLOT LOAD ERASE SAVE */
+     {"PROJECT", FAM_SAVE, SC_GLOBAL, GR_SLOTS, {G_SLOT, G_BOOT, G_LOAD, G_SAVE}},
+@@ -872,11 +890,19 @@ static const param_desc_t *page_desc(const page_t *pg, uint32_t slot, int16_t **
+         *valp = &TSEL->p[P_RECQ];
+         return track_desc(TSEL, P_RECQ);
+     }
+-    if (pg->scope == SC_GLOBAL && id >= G_WP5 && id <= G_SAFETY) {   /* GLO > WEIGHTS: the device's settings */
++    if (pg->scope == SC_GLOBAL && (weight_kind(id) >= 0 || id == G_SAFETY)) {   /* GLO > WEIGHTS: the device's settings */
++#if MELODEE_FELUCCA_ENGINES
++        static const param_desc_t weights[] = {PE("P5", N_VPOINTS, 0), PE("FM6", N_VPOINTS, 0), PE("DRUM", N_VPOINTS, 0),
++            PE("PHASE", N_VPOINTS, 0), PE("LOFI", N_VPOINTS, 0), PE("VOICE", N_VPOINTS, 0), PE("TRIO", N_VPOINTS, 0),
++            PE("WHEEL", N_VPOINTS, 0), PE("PHYS", N_VPOINTS, 0)};
++#else
+         static const param_desc_t weights[] = {PE("P5", N_VPOINTS, 0), PE("CZ-1", N_VPOINTS, 0), PE("FM6", N_VPOINTS, 0),
+-            PE("SID", N_VPOINTS, 0), PE("DRUM", N_VPOINTS, 0), PE("GUARD", N_ONOFF, 0)};
+-        *valp = id == G_SAFETY ? &settings_safety : &settings_vpoints[id - G_WP5];
+-        return &weights[id - G_WP5];
++            PE("SID", N_VPOINTS, 0), PE("DRUM", N_VPOINTS, 0)};
++#endif
++        static const param_desc_t guard = PE("GUARD", N_ONOFF, 0);
++        int k = weight_kind(id);
++        *valp = id == G_SAFETY ? &settings_safety : &settings_vpoints[k];
++        return id == G_SAFETY ? &guard : &weights[k];
+     }
+     if (pg->scope == SC_GLOBAL && id == G_BOOT) {
+         boot_cell = settings_boot;                       /* (a copy: ui_input.c edit_param writes it back) */
+diff --git a/firmware/src/settings_persist.c b/firmware/src/settings_persist.c
+index b596190..407554f 100644
+--- a/firmware/src/settings_persist.c
++++ b/firmware/src/settings_persist.c
+@@ -34,7 +34,8 @@ static int16_t settings_glo[4];                     /* ext.glo: project.c GLO_KE
+ #endif
+ #define AUTOSAVE_OFF_TAG 0xA1u                     /* CZ row byte 28: only this tag disables autosave */
+ #define WORK_BUDGET_TAG 0x57420000u /* WB: high bits of usb_off; low two bits retain USB mode */
+-/* GLO > WEIGHTS in favorites.c row 8 bytes 8..15: 'W', version 1, the five points (0 AUTO, 1..15), bit 0 of the
++/* GLO > WEIGHTS in favorites.c row 8 bytes 8..15: 'W', version 1, the five points (0 AUTO, 1..15) (version 2, the shipping
++ * engines: nine points, a nibble each, in bytes 2..6), bit 0 of the
+  * last byte SAFETY OFF. Untagged bytes default to OFF; explicit ON is tagged too. Defaults store zeros. */
+ #define VOICE_PREF_ROW 8u
+ #define VOICE_PREF_BYTE 8u
+@@ -136,10 +137,22 @@ static int settings_import(persist_t *p, int n)
+     panel = p->panel.magic == PANEL_MAGIC ? p->panel : PANEL_DEFAULT;
+     {
+         const uint8_t *w = p->favorites.factory[VOICE_PREF_ROW] + VOICE_PREF_BYTE;
+-        uint32_t tagged = w[0] == 'W' && w[1] == 1u;
++        uint32_t tagged = w[0] == 'W' && w[1] == 1u, nib = w[0] == 'W' && w[1] == 2u;
++#if MELODEE_FELUCCA_ENGINES
++        /* version 2: nine points as nibbles in bytes 2..6 (P5 FM6 DRUM PHASE LOFI VOICE TRIO WHEEL PHYS); a version 1
++         * record (P5 CZ-1 FM6 SID DRUM bytes) keeps its P5, FM6 and DRUM */
++        static const uint8_t from_v1[3][2] = {{0, 0}, {1, 2}, {2, 4}};
++        for (uint32_t k = 0; k < VOICE_KINDS; k++)
++            settings_vpoints[k] = (int16_t)(nib ? (w[2u + k / 2u] >> (k & 1u ? 4u : 0u)) & 15u : 0u);
++        if (tagged)
++            for (uint32_t j = 0; j < 3u; j++) settings_vpoints[from_v1[j][0]] = (int16_t)(w[2u + from_v1[j][1]] <= 15u ? w[2u + from_v1[j][1]] : 0u);
++        settings_safety = (int16_t)((tagged || nib) && !(w[7] & 1u));
++#else
++        (void)nib;
+         for (uint32_t k = 0; k < VOICE_KINDS; k++)
+             settings_vpoints[k] = (int16_t)(tagged && w[2u + k] <= 15u ? w[2u + k] : 0u);
+         settings_safety = (int16_t)(tagged && !(w[7] & 1u));
++#endif
+     }
+     return 1;
+ }
+@@ -201,9 +214,15 @@ static void settings_export(persist_t *p)
+             custom |= settings_vpoints[k] != 0;
+         memset(w, 0, 8);
+         if (custom) {
++#if MELODEE_FELUCCA_ENGINES
++            w[0] = 'W'; w[1] = 2u; w[7] = (uint8_t)!settings_safety;
++            for (uint32_t k = 0; k < VOICE_KINDS; k++)
++                w[2u + k / 2u] |= (uint8_t)((settings_vpoints[k] & 15) << (k & 1u ? 4u : 0u));
++#else
+             w[0] = 'W'; w[1] = 1u; w[7] = (uint8_t)!settings_safety;
+             for (uint32_t k = 0; k < VOICE_KINDS; k++)
+                 w[2u + k] = (uint8_t)settings_vpoints[k];
++#endif
+         }
+     }
+ }
+diff --git a/firmware/src/ui_input.c b/firmware/src/ui_input.c
+index 9bed493..1b86c03 100644
+--- a/firmware/src/ui_input.c
++++ b/firmware/src/ui_input.c
+@@ -1206,7 +1206,7 @@ static void edit_param(uint32_t slot, int32_t steps)
+         return;
+     }
+     if (pg->scope == SC_GLOBAL && (pg->id[slot] == G_A4 || pg->id[slot] == G_BUDGET ||
+-                                   (pg->id[slot] >= G_WP5 && pg->id[slot] <= G_SAFETY))) {
++                                   weight_kind(pg->id[slot]) >= 0 || pg->id[slot] == G_SAFETY)) {
+         settings_save();
+         return;
+     }
+diff --git a/firmware/src/voice.c b/firmware/src/voice.c
+index e8a1bf1..dabb18c 100644
+--- a/firmware/src/voice.c
++++ b/firmware/src/voice.c
+@@ -133,7 +133,12 @@ static uint32_t voice_units(const track_t *t)
+ {
+     const engine_t *e = ENGINES[t->engine];
+     /* GLO > WEIGHTS: the player's points per voice replace the built-in rule; AUTO (0) keeps it. */
++#if MELODEE_FELUCCA_ENGINES                            /* (params.c weight_kind's order) */
++    int k = e == &ENG_P5_TEST ? 0 : e == &ENG_FM6 ? 1 : e == &ENG_DRUM ? 2 : e == &ENG_FPHASE ? 3 : e == &ENG_LOFI ? 4 :
++            e == &ENG_FORMANT ? 5 : e == &ENG_TRIO ? 6 : e == &ENG_WHEEL ? 7 : e == &ENG_PHYS ? 8 : -1;
++#else
+     int k = e == &ENG_P5_TEST ? 0 : (MELODEE_CZ&&e==&ENG_CZ) ? 1 : e == &ENG_FM6 ? 2 : (MELODEE_SID&&e==&ENG_SID) ? 3 : e == &ENG_DRUM ? 4 : -1;
++#endif
+     if (k >= 0 && settings_vpoints[k] > 0)
+         return (uint32_t)settings_vpoints[k];
+ #if MELODEE_ADMISSION
+diff --git a/tests/run_tests.sh b/tests/run_tests.sh
+index 00ddb7c..6d66547 100755
+--- a/tests/run_tests.sh
++++ b/tests/run_tests.sh
+@@ -416,6 +416,7 @@ if core && [ $TABLES = 1 ]; then
+     t "boot audio: codec waits for settled silent DMA and shuts down before I2S" audio_boot_test -w
+     t "audio: overload protection, bounded fades and DMA diagnostics" audio_test $FW
+     t "GLO > WEIGHTS: per-engine budget points, SAFETY, device persistence and pages" voice_weights_test $FW
++    t "GLO > WEIGHTS, shipping engines: nine weights, three pages, v2 record, v1 migration" voice_weights_felucca_test $FWS
+     t "FX inserts: any audio effect in a track's slots through the mixer, one REVERB across the racks" fx_inserts_test -O1 $FWS
+     t "audio: silent bench keeps synthesis running and silences physical output" audio_silent_test:audio_test \
+         -DMELODEE_BENCH_SILENT=1 $FW
+diff --git a/tests/voice_weights_felucca_test.c b/tests/voice_weights_felucca_test.c
+new file mode 100644
+index 0000000..05ea2a3
+--- /dev/null
++++ b/tests/voice_weights_felucca_test.c
+@@ -0,0 +1,70 @@
++/* SPDX-License-Identifier: GPL-3.0-only
++ * Copyright (C) 2026 Kerem Kilic (Ellic Studio) */
++/* GLO > WEIGHTS with the shipping engines (MELODEE_FELUCCA_ENGINES): P5 FM6 DRUM PHASE / LOFI VOICE TRIO WHEEL /
++ * PHYS BUDGET - GUARD; each weight reaches its engine's voices only; the version 2 record (nine nibbles) and a
++ * version 1 record's P5, FM6 and DRUM. */
++#define UI_TEST_NO_MAIN 1
++#include "ui_test.c"
++
++static const uint8_t kinds[VOICE_KINDS] = {ENGI_PROPHET, ENGI_FM6, ENGI_DRUM, 2u, 3u, 5u, 6u, 7u, 9u};
++static const char *const names[VOICE_KINDS] = {"P5", "FM6", "DRUM", "PHASE", "LOFI", "VOICE", "TRIO", "WHEEL", "PHYS"};
++static const char *value(const char *title, uint32_t k, int16_t **vp, const char **label)
++{
++    static char v[12]; const char *u;
++    go_title(title);
++    const param_desc_t *d = page_desc(cur_page(), k, vp);
++    if (!d || !*vp) { *label = ""; return ""; }
++    *label = d->label;
++    param_format(d, **vp, v, &u);
++    return v;
++}
++int main(void)
++{
++    int bad = 0, ok = 1;
++    _Static_assert(VOICE_KINDS == 9u, "the shipping engines' weights");
++    ui_power_on(); memset(settings_vpoints, 0, sizeof settings_vpoints);
++    for (uint32_t k = 0; k < VOICE_KINDS; k++) {
++        set_engine_of(&trk[0], kinds[k]); trk[0].engine = trk[0].eng_req;
++        uint32_t autov = voice_units(&trk[0]);
++        settings_vpoints[k] = 7;
++        ok &= voice_units(&trk[0]) == 7u;
++        settings_vpoints[k] = 0; settings_vpoints[(k + 1u) % VOICE_KINDS] = 9;
++        ok &= voice_units(&trk[0]) == autov;                  /* another engine's weight never applies */
++        settings_vpoints[(k + 1u) % VOICE_KINDS] = 0;
++    }
++    bad += check("each of the nine weights reaches its own engine's voices only; AUTO keeps the built-in rule", ok);
++
++    int16_t *vp; const char *label;
++    static const struct { const char *page; uint8_t col, kind; } at[VOICE_KINDS] = {
++        {"WEIGHTS", 0, 0}, {"WEIGHTS", 1, 1}, {"WEIGHTS", 2, 2}, {"WEIGHTS", 3, 3},
++        {"WEIGHTS 2", 0, 4}, {"WEIGHTS 2", 1, 5}, {"WEIGHTS 2", 2, 6}, {"WEIGHTS 2", 3, 7}, {"WEIGHTS 3", 0, 8}};
++    ok = 1;
++    for (uint32_t k = 0; k < VOICE_KINDS; k++)
++        ok &= str_eq(value(at[k].page, at[k].col, &vp, &label), "AUTO") && str_eq(label, names[at[k].kind]) &&
++              vp == &settings_vpoints[at[k].kind];
++    value("WEIGHTS 3", 1, &vp, &label); ok &= str_eq(label, "BUDGET") && vp == &settings_budget;
++    ok &= str_eq(value("WEIGHTS 3", 3, &vp, &label), "OFF") && str_eq(label, "GUARD") && vp == &settings_safety;
++    value("WEIGHTS 2", 2, &vp, &label); turn(EN_K3, 2); ok &= settings_vpoints[6] == 2;   /* TRIO */
++    for (uint32_t i = 0; i < NPAGES; i++)
++        for (uint32_t c = 0; c < 4; c++) if (str_eq(PAGES[i].title, "WEIGHTS") || str_eq(PAGES[i].title, "WEIGHTS 2"))
++            ok &= PAGES[i].id[c] == 0xFF || global_reserved(PAGES[i].id[c]) || PAGES[i].id[c] == G_BUDGET;
++    bad += check("WEIGHTS: P5 FM6 DRUM PHASE; 2: LOFI VOICE TRIO WHEEL; 3: PHYS BUDGET - GUARD; on reserved ids", ok);
++
++    persist_t p; memset(&p, 0, sizeof p);
++    static const int16_t custom[VOICE_KINDS] = {3, 0, 1, 15, 2, 9, 4, 6, 12};
++    memcpy(settings_vpoints, custom, sizeof custom); settings_safety = 0;
++    settings_export(&p);
++    const uint8_t *w = p.favorites.factory[8] + 8;
++    ok = w[0] == 'W' && w[1] == 2u && w[7] == 1u && settings_legacy_valid(&p);
++    memset(settings_vpoints, 0, sizeof settings_vpoints); settings_safety = 1;
++    ok &= settings_import(&p, (int)sizeof p) && !memcmp(settings_vpoints, custom, sizeof custom) && !settings_safety;
++    bad += check("version 2: nine weights as nibbles and GUARD survive export / import", ok);
++
++    persist_t q = p; uint8_t *v1 = q.favorites.factory[8] + 8;
++    memset(v1, 0, 8); v1[0] = 'W'; v1[1] = 1u; v1[2] = 5; v1[3] = 4; v1[4] = 3; v1[5] = 2; v1[6] = 1; v1[7] = 0;
++    ok = settings_import(&q, (int)sizeof q) && settings_vpoints[0] == 5 && settings_vpoints[1] == 3 && settings_vpoints[2] == 1 &&
++         !settings_vpoints[3] && !settings_vpoints[8] && settings_safety == 1;
++    bad += check("a version 1 record (P5 CZ-1 FM6 SID DRUM) keeps P5, FM6 and DRUM; the CZ-1 and SID points go", ok);
++    printf(bad ? "voice weights (shipping): %d FAILED\n" : "GLO > WEIGHTS, shipping engines: nine weights, three pages, v2 record and v1 migration: OK\n", bad);
++    return bad != 0;
++}
+diff --git a/web/manual/index.html b/web/manual/index.html
+index 046e38e..fc3f315 100644
+--- a/web/manual/index.html
++++ b/web/manual/index.html
+@@ -932,7 +932,7 @@
+             <tr><td>MIXER</td><td><kbd>KNOB 1</kbd> LEVEL, <kbd>KNOB 2</kbd> PAN, <kbd>KNOB 4</kbd> MUTE for the selected track. Sends live on the effect pages.</td></tr>
+             <tr><td>GLOBAL</td><td><kbd>KNOB 1</kbd> A4 concert pitch (<strong>400–480&nbsp;Hz</strong>, default 440), <kbd>KNOB 2</kbd> <strong>BUDGET</strong> budget for CPU resources (8–32 points, default 18; see <a href="#tracks">Tracks</a>), <kbd>KNOB 3</kbd> CLK (INT / USB / TRS / BLE; see <a href="#midi-clock">Clock and transport</a>), <kbd>KNOB 4</kbd> TUNE (fine cents, ±50). A4, BUDGET and CLK are device settings: they survive power-off and stay when you load a project. TUNE, and SYSTEM’s MIDI and ROUT, come back at power-on, but a project or template brings its own.</td></tr>
+             <tr><td>SYSTEM</td><td>MIDI (the input MIDI tracks listen to: USB, TRS or BLE; instrument tracks accept every input), DRUM channel (OFF or 1–16, default 10), ROUT (<strong>CH1-4</strong>, <strong>SEL</strong>, <strong>CH5-8</strong>, <strong>CH9-12</strong> or <strong>CH13-16</strong>), and CPU info. <kbd>KNOB 1</kbd> also shows receive activity. See <a href="#midi">MIDI</a>.</td></tr>
+-            <tr><td>WEIGHTS, WEIGHTS 2</td><td>Budget points per sounding voice for P5, FM6 and DRUM (the CZ-1 and SID rows only act in firmware built with those engines): <strong>AUTO</strong> (default, the rule under <a href="#tracks">Tracks</a>) or a number. A higher number lets fewer voices of that engine start. WEIGHTS 2 also has BUDGET and <strong>GUARD</strong>: ON lets an audio overload cut releasing voices. With OFF (default) the audio may glitch instead, and an overload that lasts several seconds can freeze the panel and restart the FM-1. Device settings; they survive power-off and stay when you load a project.</td></tr>
++            <tr><td>WEIGHTS, WEIGHTS 2, WEIGHTS 3</td><td>Budget points per sounding voice for P5, FM6, DRUM, PHASE, LOFI, VOICE, TRIO, WHEEL and PHYS: <strong>AUTO</strong> (default, the rule under <a href="#tracks">Tracks</a>) or a number. A higher number lets fewer voices of that engine start. WEIGHTS 3 also has BUDGET and <strong>GUARD</strong>: ON lets an audio overload cut releasing voices. With OFF (default) the audio may glitch instead, and an overload that lasts several seconds can freeze the panel and restart the FM-1. Device settings; they survive power-off and stay when you load a project.</td></tr>
+           </tbody>
+         </table>
+       </section>
+-- 
+2.43.0
+
