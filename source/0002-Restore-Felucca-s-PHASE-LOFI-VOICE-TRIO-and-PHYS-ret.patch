@@ -1,7 +1,7 @@
 From e0ef7e4a1558fceed7e81d3d35e06c3b269c24d2 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Tue, 3 Nov 2026 14:27:48 +0000
-Subject: [PATCH 2/3] Restore Felucca's PHASE, LOFI, VOICE, TRIO and PHYS;
+Subject: [PATCH 2/4] Restore Felucca's PHASE, LOFI, VOICE, TRIO and PHYS;
  retire CZ-1 and SID; add CC 20-27
 
 MELODEE_FELUCCA_ENGINES (default 1) puts Felucca's PHASE (2, with FOLD), LOFI (3), VOICE (5),

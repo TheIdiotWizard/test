@@ -10,6 +10,8 @@ The firmware in `firmware/melodee-1.6.1.fwsc` is [keremimo/melodee](https://gith
    - CC 20–23: the four Stage knobs of the track the channel plays
    - CC 24: that track's sound, stepped as PRESETS does
    - CC 91 / 93: MIX of the shared rack's REVERB (or ROOM) / CHORUS (or PEDAL CHORUS)
+4. `0004-…` — fix (also in upstream Melodee): a key, or a ROUT SEL MIDI note, could play another track's sound
+   when it arrived while the screen code briefly selected that track (Stage draws each track's row that way).
 
 ```
 git clone https://github.com/keremimo/melodee && cd melodee && git checkout 165d177

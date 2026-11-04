@@ -1,7 +1,7 @@
 From 0ecad2430225ef264b405698163c70c0be6dea03 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Wed, 4 Nov 2026 04:10:20 +0000
-Subject: [PATCH 3/3] MIDI CCs: 20-23 the channel's track's Stage knobs, 24 its
+Subject: [PATCH 3/4] MIDI CCs: 20-23 the channel's track's Stage knobs, 24 its
  sound, 91/93 the shared reverb/chorus
 
 CC 20-23 set the four Stage knobs of the track the channel plays (absolute), not the knobs of the

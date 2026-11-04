@@ -1,0 +1,242 @@
+From de9b1184195f17d16db874b4a20bf6f340893508 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 4 Nov 2026 14:02:58 +0000
+Subject: [PATCH 4/4] Fix: keys and ROUT SEL notes sounding another track while
+ the UI borrows the selection
+
+Stage's track rows (cur_entry for each row), MIDI LEARN and a new project set song.sel to another
+track for a moment and back, in the main loop. The audio interrupt reads song.sel for a key press
+(kb_trk), ROUT SEL routing and capture, so a key or note landing in that window played the
+borrowed track's sound. Borrowers now mark the selection borrowed (sel_borrow_begin/end) and the
+interrupt reads SEL_LIVE, the player's selection. Present in upstream Melodee.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_0131vpfZVN4vprBnQkpmn5yn
+---
+ firmware/src/core.h     | 23 +++++++++++++++++++++++
+ firmware/src/seq.c      |  8 ++++----
+ firmware/src/ui_input.c | 18 +++++++++---------
+ firmware/src/ui_new.c   |  3 ++-
+ firmware/src/ui_stage.c |  4 ++--
+ tests/midi_knob_test.c  | 31 ++++++++++++++++++++++++++++++-
+ 6 files changed, 70 insertions(+), 17 deletions(-)
+
+diff --git a/firmware/src/core.h b/firmware/src/core.h
+index 0b0b976..4248437 100644
+--- a/firmware/src/core.h
++++ b/firmware/src/core.h
+@@ -615,6 +615,29 @@ static inline uint32_t swing_step_len(const track_t *t, uint32_t base, uint32_t
+ 
+ /* ----------------------------------------------------------- system --- */
+ #define RING_PUBLISH() __asm__ volatile("" ::: "memory")   /* slot store before the index update */
++/* The main loop borrows the selection for calls that read TSEL about another track (Stage's rows, MIDI LEARN, the
++ * fixed CCs): sel_borrow_begin, song.sel = that track, the call, sel_borrow_end. The audio interrupt reads SEL_LIVE,
++ * the selection the player made: a key pressed (or a ROUT SEL note) while the selection is borrowed went to the
++ * borrowed track before, sounding another track's sound. Borrows nest */
++static volatile uint8_t sel_borrowed, sel_owner;
++#define SEL_LIVE ((uint32_t)(sel_borrowed ? sel_owner : song.sel))
++static inline uint32_t sel_borrow_begin(void)
++{
++    uint32_t s = song.sel;
++    if (!sel_borrowed) sel_owner = (uint8_t)s;
++    RING_PUBLISH();
++    sel_borrowed++;
++    RING_PUBLISH();
++    return s;
++}
++static inline void sel_borrow_end(uint32_t s)
++{
++    RING_PUBLISH();
++    song.sel = (uint8_t)s;
++    RING_PUBLISH();
++    sel_borrowed--;
++    RING_PUBLISH();
++}
+ static volatile uint32_t fm1_ms;  /* milliseconds since boot (TIMER4-based, TIMER5 ISR in main.c) */
+ /* boot-loop guard (main.c): two boots in a row that die in the first 30 s -> UBOOT */
+ #define BOOTGUARD_MAGIC 0x42475244u
+diff --git a/firmware/src/seq.c b/firmware/src/seq.c
+index 960015a..081e524 100644
+--- a/firmware/src/seq.c
++++ b/firmware/src/seq.c
+@@ -410,7 +410,7 @@ static uint32_t cap_len(const cap_ev_t *e, uint32_t now)   /* its length (held:
+ }
+ static void cap_on(const track_t *t, uint32_t note, uint32_t vel)
+ {
+-    uint32_t k = trk_index(t), selected = song.sel, hint = midi_hint;
++    uint32_t k = trk_index(t), selected = SEL_LIVE, hint = midi_hint;
+     /* MPC pads select their track in the next UI frame. Retain their first
+      * onset too, using the pending selection published before MIDI playback. */
+     if (trk[0].p[P_QUANT] == Q_MPC && (hint & MIDI_TRACK_FOLLOW))
+@@ -842,7 +842,7 @@ static void keyboard_block(void)
+         if (!((ch >> k) & 1u))
+             continue;
+         if ((cur >> k) & 1u) {                    /* the selected track; the key-up goes to the same one */
+-            kb_trk[k] = song.sel;
++            kb_trk[k] = (uint8_t)SEL_LIVE;              /* (never a selection the UI borrowed: core.h) */
+             if (kb_asleep) { kb_note[k]=KB_SILENT; continue; }
+             if ((fm1_in.buttons & punch_panel_mask) || punch_panel_lock) {
+                 kb_note[k] = KB_SILENT;
+@@ -973,7 +973,7 @@ static void seq_start(void)
+     }
+     seq_seek_units = 0;
+     cap_from = cap_w;                              /* capture and the jam log: this run */
+-    cap_track = song.sel;
++    cap_track = SEL_LIVE;
+     jam.n = 0;
+     song.tick = 0;
+     beat_pos = 0; beat_n = 0;                      /* the ARP LED's beat from the top too */
+@@ -1291,7 +1291,7 @@ static track_t *midi_track(uint32_t ch)
+                 return &trk[k];
+     }
+     if (route == 1u)
+-        return TSEL;
++        return &trk[SEL_LIVE];                      /* (SEL: the player's selection, core.h) */
+     return ch - first < trk_n() ? &trk[ch - first] : 0;
+ }
+ 
+diff --git a/firmware/src/ui_input.c b/firmware/src/ui_input.c
+index 31b65f0..6aa7804 100644
+--- a/firmware/src/ui_input.c
++++ b/firmware/src/ui_input.c
+@@ -2138,7 +2138,7 @@ static void mlearn_apply(const mlearn_t *b, uint32_t value)
+ {
+     if (b->track >= trk_n() || trk[b->track].eng_req != b->eng || (b->page != 0xFFu && b->page >= NPAGES))
+         return;
+-    __typeof__(song.sel) sel = song.sel;                /* (the bound track for edit_param's TSEL, then back) */
++    uint32_t sel = sel_borrow_begin();                  /* (the bound track for edit_param's TSEL, then back) */
+     const page_t *over = page_over;
+     song.sel = b->track;
+     page_over = b->page == 0xFFu ? stage_page() : &PAGES[b->page];
+@@ -2148,30 +2148,30 @@ static void mlearn_apply(const mlearn_t *b, uint32_t value)
+         midi_edit_value = -1;
+     }
+     page_over = over;
+-    song.sel = sel;
++    sel_borrow_end(sel);
+     if (b->track == song.sel) ui.force = 1;
+ }
+ /* CC 20..23: the Stage knob k of track tr (its engine's, as MIDI LEARN binds Stage's knobs), the value absolute */
+ static void midi_stage_knob(uint32_t tr, uint32_t k, uint32_t value)
+ {
+-    __typeof__(song.sel) sel = song.sel;
++    uint32_t sel = sel_borrow_begin();
+     const page_t *over = page_over;
+-    song.sel = tr;
++    song.sel = (uint8_t)tr;
+     page_over = stage_page();
+     midi_edit_value = (int32_t)value;
+     edit_param(k, 0);
+     midi_edit_value = -1;
+     page_over = over;
+-    song.sel = sel;
++    sel_borrow_end(sel);
+     ui.force = 1;
+ }
+ /* CC 24: track tr's sound steps by s, as PRESETS steps it (its LIST, all engines then the user presets; wraps) */
+ static void midi_track_preset(uint32_t tr, int32_t s)
+ {
+-    __typeof__(song.sel) sel = song.sel;
+-    uint32_t total, cur, n;
++    uint32_t total, cur, n, sel;
+     if (!s || trk_midi_slot(tr)) return;
+-    song.sel = tr;
++    sel = sel_borrow_begin();
++    song.sel = (uint8_t)tr;
+     cur = list_cur(&total);
+     if (total) {
+         int32_t m = s % (int32_t)total;
+@@ -2179,7 +2179,7 @@ static void midi_track_preset(uint32_t tr, int32_t s)
+         if (brw.on && brw.trk == tr) brw.on = 0;     /* (a PRESETS browse of this track waits no longer) */
+         if (n != cur) preset_go(n);
+     }
+-    song.sel = sel;
++    sel_borrow_end(sel);
+     ui.force = 1;
+ }
+ /* CC 91 / 93: the MIX of the shared rack's slot holding want (else alt), 0..127 over MIX's range */
+diff --git a/firmware/src/ui_new.c b/firmware/src/ui_new.c
+index d34a7a8..946b222 100644
+--- a/firmware/src/ui_new.c
++++ b/firmware/src/ui_new.c
+@@ -64,6 +64,7 @@ static void new_create(void)
+     else project_new_blank();
+     song.ntrk = NPART;                              /* (every part's place: the roles say which stay) */
+     sel = song.sel % NPART;
++    (void)sel_borrow_begin();                       /* (the roles' tracks borrow the selection: core.h) */
+     undo_depth++;                                   /* (no undo levels: a new project) */
+     for (k = 0; k < NPART; k++) {
+         uint32_t src, kk, cs, ck;
+@@ -86,7 +87,7 @@ static void new_create(void)
+         }
+     }
+     undo_depth--;
+-    song.sel = (uint8_t)sel;
++    sel_borrow_end(sel);
+     for (k = NPART; k-- > 0u;) {                    /* the places with no role: the last ones empty, one between moves */
+         if (nw.role[k] != NR_NONE || trk_n() < 2u)  /* the tracks after down (one track stays) */
+             continue;
+diff --git a/firmware/src/ui_stage.c b/firmware/src/ui_stage.c
+index e20255c..eaa9e21 100644
+--- a/firmware/src/ui_stage.c
++++ b/firmware/src/ui_stage.c
+@@ -309,10 +309,10 @@ static void stage_shape(void)
+ /* track k's sound as a list entry (browse.c cur_entry, which reads the selected track) */
+ static void stage_entry(uint32_t k, uint32_t *src, uint32_t *kk)
+ {
+-    uint8_t s = song.sel;
++    uint32_t s = sel_borrow_begin();                    /* (the keys keep the real selection: core.h) */
+     song.sel = (uint8_t)k;
+     cur_entry(src, kk);
+-    song.sel = s;
++    sel_borrow_end(s);
+ }
+ /* a name in two lines of w px in face f: the first ends at the last space, '.' or '-' that fits (one long word: cut),
+  * the rest below (MIXER's strips) */
+diff --git a/tests/midi_knob_test.c b/tests/midi_knob_test.c
+index 00ace94..0087365 100644
+--- a/tests/midi_knob_test.c
++++ b/tests/midi_knob_test.c
+@@ -261,9 +261,38 @@ static int fixed_controls(void)
+     return bad;
+ }
+ 
++/* The UI borrows the selection (Stage's rows, MIDI LEARN, the fixed CCs: core.h sel_borrow_begin): a key or a ROUT SEL
++ * note arriving meanwhile plays the player's selected track, never the borrowed one */
++static uint32_t voices_on(const track_t *t)
++{
++    uint32_t n = 0;
++    for (uint32_t i = 0; i < NVOICE; i++) n += t->v[i].active != 0;
++    return n;
++}
++static int borrowed_selection(void)
++{
++    int bad = 0;
++    knob_reset(MK_OFF, MK_ABSOLUTE);
++    for (uint32_t k = 0; k < 3u; k++) set_engine_of(&trk[k], HOST_SYNTH);
++    song.sel = 0; song.g[G_ROUTE] = 1;                  /* ROUT SEL: notes go to the selected track */
++    fm1_in.notes = kb_prev = 0; events_block(CTL);
++    uint32_t s = sel_borrow_begin();
++    song.sel = 2;                                       /* (as Stage's row for track 3 does, mid-frame) */
++    fm1_in.notes = 1u << 7; events_block(CTL);          /* a key pressed while track 3 is borrowed */
++    bad += check("a key pressed while the UI borrows the selection plays the selected track",
++                 voices_on(&trk[0]) && !voices_on(&trk[2]) && kb_trk[7] == 0);
++    route_input(1, 0x90, 72, 100);
++    bad += check("a ROUT SEL note while the selection is borrowed plays the selected track", !voices_on(&trk[2]));
++    sel_borrow_end(s);
++    bad += check("the borrow ends on the real selection", song.sel == 0 && SEL_LIVE == 0 && !sel_borrowed);
++    fm1_in.notes = 0; events_block(CTL); route_input(1, 0x80, 72, 0);
++    bad += check("the key's release reaches the track it played", !trk[0].nheld);
++    return bad;
++}
++
+ int main(void)
+ {
+-    int bad = panel_controls() + encoder_modes() + isolation_and_overflow() + page_and_local_controls() + fixed_controls();
++    int bad = panel_controls() + encoder_modes() + isolation_and_overflow() + page_and_local_controls() + fixed_controls() + borrowed_selection();
+     printf("%s\n", bad ? "MIDI KNOB TEST FAILED" : "MIDI knob integration tests passed");
+     return bad != 0;
+ }
+-- 
+2.43.0
+
