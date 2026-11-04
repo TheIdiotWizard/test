@@ -1,13 +1,15 @@
 # Source for this build
 
 The firmware in `firmware/melodee-1.6.1.fwsc` is [keremimo/melodee](https://github.com/keremimo/melodee) at
-`165d177` (1.6.1) with these two patches, applied in order:
+`165d177` (1.6.1) with these patches, applied in order:
 
 1. `0001-…` — Felucca's WHEEL organ restored (the melodee-wheel.patch you supplied).
 2. `0002-…` — Felucca's PHASE (with FOLD), LOFI, VOICE, TRIO and PHYS restored at their original engine numbers;
-   CZ-1 and SID retired (DRUM keeps KIT SID); fixed MIDI CCs:
-   - CC 20–23: the FM-1's knobs 1–4, whatever they edit on the screen shown
-   - CC 24–27: the LVL of tracks 1–4
+   CZ-1 and SID retired (DRUM keeps KIT SID).
+3. `0003-…` — fixed MIDI CCs, on the channel's own track:
+   - CC 20–23: the four Stage knobs of the track the channel plays
+   - CC 24: that track's sound, stepped as PRESETS does
+   - CC 91 / 93: MIX of the shared rack's REVERB (or ROOM) / CHORUS (or PEDAL CHORUS)
 
 ```
 git clone https://github.com/keremimo/melodee && cd melodee && git checkout 165d177

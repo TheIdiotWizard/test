@@ -1,0 +1,373 @@
+From 0ecad2430225ef264b405698163c70c0be6dea03 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 4 Nov 2026 04:10:20 +0000
+Subject: [PATCH 3/3] MIDI CCs: 20-23 the channel's track's Stage knobs, 24 its
+ sound, 91/93 the shared reverb/chorus
+
+CC 20-23 set the four Stage knobs of the track the channel plays (absolute), not the knobs of the
+screen shown. CC 24 steps that track's sound as PRESETS does. CC 91 and 93 set the MIX of the
+shared rack's REVERB (else ROOM) and CHORUS (else PEDAL CHORUS). CC 24-27's track levels are gone.
+A MIDI Track's channel passes these CCs on.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_0131vpfZVN4vprBnQkpmn5yn
+---
+ README.md                    | 14 ++++--
+ firmware/src/midi_control.c  |  7 +--
+ firmware/src/midi_knobs.c    | 30 ++++++++----
+ firmware/src/ui_input.c      | 59 ++++++++++++++++++++++++
+ firmware/src/ui_midi_knobs.c | 15 ++----
+ tests/midi_knob_test.c       | 89 +++++++++++++++++++++++-------------
+ tests/run_tests.sh           |  4 +-
+ web/manual/index.html        | 10 ++--
+ 8 files changed, 159 insertions(+), 69 deletions(-)
+
+diff --git a/README.md b/README.md
+index e5274dd..af752a6 100644
+--- a/README.md
++++ b/README.md
+@@ -600,11 +600,15 @@ user presets saved by earlier Melodee versions are not imported, and the user sa
+ - **MIDI LEARN and controllers:** the HOME menu's **MIDI LEARN** binds up to 16 CCs to any knob of a track's page or
+   Stage's knobs: start it, turn a knob, send a CC. Bindings are kept only until power-off. **MIDI KNOBS** (GENERAL or
+   MINILAB) operates the eight panel controls from a controller
+-- **Fixed CCs, always on:** CC 20–23 turn the FM-1's knobs 1–4, whatever they edit on the screen shown (Stage, an
+-  EDIT page, FX), and CC 24–27 set the LVL of tracks 1–4, on any channel the ROUT setting admits. The values are
+-  absolute: a value is the knob's place across its range, and a knob's first value only sets where it is. A CC
+-  bound with MIDI LEARN does what MIDI LEARN gave it instead. For a MiniLab 3, set four knobs to CC 20–23 (absolute)
+-  and the four faders to CC 24–27 in a User template in Arturia's MIDI Control Center
++- **Fixed CCs, always on:** on any channel the ROUT setting admits to a synth or drum track, whatever the screen
++  shows: CC 20–23 set the four Stage knobs of that channel's track (its engine's main controls), absolute across
++  each range; CC 24 steps that track's sound as PRESETS does (all engines, then the user presets, as LIST shows them),
++  one sound per step of the value (or per encoder step in a relative MIDI MODE), its first value only setting where
++  the knob is; CC 91 and CC 93 set the MIX of the shared rack's REVERB (else ROOM) and CHORUS (else PEDAL CHORUS),
++  if the rack has one. A MIDI KNOBS profile's own CCs come first (MINILAB uses CC 93 for its knob 5), then MIDI
++  LEARN's; a MIDI Track's channel passes these CCs on to the external gear. For a MiniLab 3, make a User template in
++  Arturia's MIDI Control Center with four knobs on CC 20–23 (absolute), one on CC 24, and reverb and chorus on
++  CC 91 and 93
+ - **Bluetooth MIDI:** one BLE-MIDI connection, in and out, alongside USB and TRS. Hold HOME and choose **BLUETOOTH**.
+   **Mode** picks how you connect: **CONNECT OUT** scans for BLE controllers and synths from that page; **VISIBLE**
+   advertises as Melodee XXXX so a Mac, iPad or phone can connect. The radio's on/off state, the pairing and the last
+diff --git a/firmware/src/midi_control.c b/firmware/src/midi_control.c
+index 9f2a360..17dc454 100644
+--- a/firmware/src/midi_control.c
++++ b/firmware/src/midi_control.c
+@@ -383,11 +383,8 @@ static void __attribute__((noinline)) midi_event(uint32_t st, uint32_t ch, uint3
+     /* Panel CCs are consumed once, before modulation, synth controls or MIDI
+      * Track forwarding. ROUT admits the channel; the UI edits the selected part. */
+     if (st == 0xB0u && t && midi_knob_receive(ch, d1, d2)) return;
+-    if (st == 0xB0u && t && midi_fixed_knob_receive(ch, d1, d2)) return;   /* CC 20..23: knobs 1..4 */
+-    if (st == 0xB0u && t && d1 - MIDI_CC_LEVEL < (uint32_t)NPART) {       /* CC 24..27: tracks 1..4's LVL */
+-        midi_parameter(&trk[d1 - MIDI_CC_LEVEL], 7u, d2);
+-        return;
+-    }
++    if (st == 0xB0u && t && !midi_track_only(t) && midi_fixed_receive(ch, d1, d2, trk_index(t)))
++        return;                                      /* CC 20..24, 91, 93 (midi_knobs.c) */
+     if (st != 0x80u && st != 0x90u) {
+         uint32_t targets = midi_targets(ch);
+         for (uint32_t tr = 0; tr < trk_n(); tr++)
+diff --git a/firmware/src/midi_knobs.c b/firmware/src/midi_knobs.c
+index bb7b793..01e4191 100644
+--- a/firmware/src/midi_knobs.c
++++ b/firmware/src/midi_knobs.c
+@@ -40,23 +40,33 @@ static int midi_knob_receive(uint32_t ch, uint32_t cc, uint32_t value)
+     return 1;
+ }
+ 
+-/* Fixed CCs, whatever MIDI KNOBS is set to: CC 20..23 turn the FM-1's knobs 1..4 (whatever they edit on the screen
+- * shown, as a hand would), CC 24..27 set tracks 1..4's LVL (midi_control.c, as CC 7 sets a channel's own track).
+- * Absolute: a value is the knob's place over its range. Knob packets share the panel queue (bit 28: fixed, k: the
+- * knob 0..3); a learned CC (MIDI LEARN) still wins */
+-#define MIDI_CC_KNOB 20u                         /* CC 20..23: knobs 1..4 */
+-#define MIDI_CC_LEVEL 24u                        /* CC 24..27: tracks 1..4's LVL */
++/* Fixed CCs, whatever MIDI KNOBS is set to (a MIDI KNOBS profile's own CCs come first, then MIDI LEARN's), on a
++ * channel ROUT admits to a synth or drum track (a MIDI Track's channel passes them on as before):
++ *   CC 20..23  the four Stage knobs of the channel's track (its engine's knob 1..4), whatever the screen shows:
++ *              absolute, the value is the parameter's place over its range
++ *   CC 24      the channel's track's sound, as PRESETS steps it (its LIST): by the change of the value
++ *              (MIDI MODE ABSOLUTE; a relative MIDI MODE: the encoder's steps)
++ *   CC 91, 93  MIX of the shared (master) rack's REVERB (else ROOM), CHORUS (else PEDAL CHORUS)
++ * The packets share the panel queue: bit 28 fixed, k (bits 7..9) the control (0..3 a knob, MCC_PRESET, MCC_REVERB,
++ * MCC_CHORUS), bits 16..19 the track the channel played when the CC came (ui_midi_knobs.c applies it) */
++#define MIDI_CC_KNOB 20u                         /* CC 20..23: the channel's track's Stage knobs 1..4 */
++#define MIDI_CC_PRESET 24u                       /* CC 24: the channel's track's sound */
++#define MIDI_CC_REVERB 91u
++#define MIDI_CC_CHORUS 93u
++enum { MCC_PRESET = 4u, MCC_REVERB, MCC_CHORUS };
+ #define MIDI_KNOB_FIXED (1u << 28)
+-static int midi_fixed_knob_receive(uint32_t ch, uint32_t cc, uint32_t value)
++static int midi_fixed_receive(uint32_t ch, uint32_t cc, uint32_t value, uint32_t track)
+ {
+-    uint32_t k = cc - MIDI_CC_KNOB, w = midi_knob_w;
+-    if (k >= 4u) return 0;
++    uint32_t k = cc - MIDI_CC_KNOB < 4u ? cc - MIDI_CC_KNOB : cc == MIDI_CC_PRESET ? MCC_PRESET :
++                 cc == MIDI_CC_REVERB ? MCC_REVERB : cc == MIDI_CC_CHORUS ? MCC_CHORUS : 8u, w = midi_knob_w;
++    if (k >= 8u || track >= NTRK) return 0;
+     if (w - midi_knob_r >= MIDI_KNOB_Q) { midi_knob_overflow = 1; return 1; }
+     uint32_t src = midi_event_source == 2u ? 1u : 0u, epoch = midi_knob_usb_epoch;
+ #if MELODEE_BLE
+     if (midi_event_source == 3u) { src = 2u; epoch = midi_knob_ble_epoch; }
+ #endif
+-    midi_knob_q[w % MIDI_KNOB_Q] = MIDI_KNOB_FIXED | value | k << 7 | ch << 10 | src << 14 | (src == 1u ? 0u : epoch << 20);
++    midi_knob_q[w % MIDI_KNOB_Q] = MIDI_KNOB_FIXED | value | k << 7 | ch << 10 | src << 14 | track << 16 |
++                                   (src == 1u ? 0u : epoch << 20);
+     RING_PUBLISH();
+     midi_knob_w = w + 1u;
+     return 1;
+diff --git a/firmware/src/ui_input.c b/firmware/src/ui_input.c
+index ecb1562..31b65f0 100644
+--- a/firmware/src/ui_input.c
++++ b/firmware/src/ui_input.c
+@@ -2151,6 +2151,65 @@ static void mlearn_apply(const mlearn_t *b, uint32_t value)
+     song.sel = sel;
+     if (b->track == song.sel) ui.force = 1;
+ }
++/* CC 20..23: the Stage knob k of track tr (its engine's, as MIDI LEARN binds Stage's knobs), the value absolute */
++static void midi_stage_knob(uint32_t tr, uint32_t k, uint32_t value)
++{
++    __typeof__(song.sel) sel = song.sel;
++    const page_t *over = page_over;
++    song.sel = tr;
++    page_over = stage_page();
++    midi_edit_value = (int32_t)value;
++    edit_param(k, 0);
++    midi_edit_value = -1;
++    page_over = over;
++    song.sel = sel;
++    ui.force = 1;
++}
++/* CC 24: track tr's sound steps by s, as PRESETS steps it (its LIST, all engines then the user presets; wraps) */
++static void midi_track_preset(uint32_t tr, int32_t s)
++{
++    __typeof__(song.sel) sel = song.sel;
++    uint32_t total, cur, n;
++    if (!s || trk_midi_slot(tr)) return;
++    song.sel = tr;
++    cur = list_cur(&total);
++    if (total) {
++        int32_t m = s % (int32_t)total;
++        n = cur >= total ? (s > 0 ? 0u : total - 1u) : (uint32_t)(((int32_t)cur + m + (int32_t)total) % (int32_t)total);
++        if (brw.on && brw.trk == tr) brw.on = 0;     /* (a PRESETS browse of this track waits no longer) */
++        if (n != cur) preset_go(n);
++    }
++    song.sel = sel;
++    ui.force = 1;
++}
++/* CC 91 / 93: the MIX of the shared rack's slot holding want (else alt), 0..127 over MIX's range */
++static void midi_master_fx_mix(int32_t want, int32_t alt, uint32_t value)
++{
++    uint32_t slot, found = FX_SLOTS;
++    for (slot = 0; slot < FX_SLOTS && found == FX_SLOTS; slot++)
++        if (song.g[G_MFXTYPE + slot * FX_PARAMS] == want) found = slot;
++    for (slot = 0; slot < FX_SLOTS && found == FX_SLOTS; slot++)
++        if (song.g[G_MFXTYPE + slot * FX_PARAMS] == alt) found = slot;
++    if (found == FX_SLOTS) return;                     /* (no such effect in the rack: nothing to set) */
++    const param_desc_t *d = global_desc(G_MFXMIX + found * FX_PARAMS);
++    song.g[G_MFXMIX + found * FX_PARAMS] = (int16_t)(d->min + (int32_t)(value * (uint32_t)(d->max - d->min) / 127u));
++    ui.force = 1;
++}
++static void midi_fixed_apply(uint32_t k, uint32_t tr, uint32_t v, uint32_t src, uint32_t ch)
++{
++    static uint8_t last[NTRK], seen;                   /* CC 24: the last value per track (ABSOLUTE) */
++    if (tr >= trk_n()) return;
++    if (k < 4u) midi_stage_knob(tr, k, v);
++    else if (k == MCC_PRESET) {
++        uint32_t mode = settings_midi_knob_mode;
++        int32_t s = mode != MK_ABSOLUTE ? midi_knob_relative(v, mode) : (seen >> tr) & 1u ? (int32_t)v - last[tr] : 0;
++        last[tr] = (uint8_t)v;
++        seen |= (uint8_t)(1u << tr);
++        midi_track_preset(tr, s);
++    } else if (k == MCC_REVERB) midi_master_fx_mix(FX_REVERB, FX_ROOM, v);
++    else if (k == MCC_CHORUS) midi_master_fx_mix(FX_CHORUS, FX_PEDAL_CHORUS, v);
++    (void)src; (void)ch;
++}
+ static void mlearn_poll(void)
+ {
+     int32_t cc = mlearn_seen;
+diff --git a/firmware/src/ui_midi_knobs.c b/firmware/src/ui_midi_knobs.c
+index f8dadef..789d7fa 100644
+--- a/firmware/src/ui_midi_knobs.c
++++ b/firmware/src/ui_midi_knobs.c
+@@ -16,6 +16,7 @@ static uint32_t midi_knob_ui_config;
+ #if MELODEE_BLE
+ static uint8_t midi_knob_ui_ble_epoch;
+ #endif
++static void midi_fixed_apply(uint32_t k, uint32_t track, uint32_t v, uint32_t src, uint32_t ch);   /* ui_input.c */
+ static int32_t midi_knob_relative(uint32_t value, uint32_t mode)
+ {
+     if (mode == MK_REL1) return (int32_t)value - 64;
+@@ -64,19 +65,9 @@ static void midi_knobs_poll(void)
+ #if MELODEE_BLE
+         if (src == 2u && ((pkt >> 20) & 255u) != midi_knob_ui_ble_epoch) continue;
+ #endif
+-        if (fixed) {                            /* CC 20..23: knob k + 1 (midi_knobs.c). A parameter takes the value as
+-                                                 * its place; other controls step by the change (the first value of a
+-                                                 * knob only sets where it is, as MIDI KNOBS' absolute mode does) */
+-            static uint8_t fixed_last[4], fixed_seen;
+-            uint32_t role = EN_K1 + (k &= 3u);
+-            int32_t delta = (fixed_seen >> k) & 1u ? (int32_t)v - fixed_last[k] : 0;
+-            fixed_last[k] = (uint8_t)v;
+-            fixed_seen |= (uint8_t)(1u << k);
++        if (fixed) {                            /* CC 20..24, 91, 93 (midi_knobs.c): on its track, whatever is shown */
+             panel_moved = 1;
+-            if (!delta) continue;
+-            midi_panel_delta[role] = clamp(midi_panel_delta[role] + delta, -1024, 1024);
+-            midi_panel_mask |= (uint8_t)(1u << role);
+-            midi_panel_absolute[role] = (int16_t)v;
++            midi_fixed_apply(k, (pkt >> 16) & 15u, v, src, ch);
+             continue;
+         }
+         uint32_t mode = settings_midi_knob_mode, seen = midi_knob_seen[src][ch] & (1u << k);
+diff --git a/tests/midi_knob_test.c b/tests/midi_knob_test.c
+index 9db1203..00ace94 100644
+--- a/tests/midi_knob_test.c
++++ b/tests/midi_knob_test.c
+@@ -188,47 +188,74 @@ static int page_and_local_controls(void)
+     return bad;
+ }
+ 
+-/* CC 20..23: the FM-1's knobs 1..4, whatever MIDI KNOBS is set to; CC 24..27: tracks 1..4's LVL */
++/* CC 20..23: the Stage knobs of the channel's track; CC 24: its sound, as PRESETS steps it; CC 91 / 93: the shared rack's
++ * REVERB / CHORUS MIX. Whatever MIDI KNOBS is set to and whatever the screen shows; ROUT CH1-4: channel n, track n */
++static void ch_cc(uint32_t ch, uint32_t cc, uint32_t value) { route_input(1, 0xB0u | ch, cc, value); ui_input(); }
+ static int fixed_controls(void)
+ {
+     int bad = 0;
+-    const param_desc_t *d;
+-    int16_t *vp;
+     for (uint32_t profile = MK_OFF; profile <= MK_MINILAB; profile++) {
+         knob_reset(profile, MK_ABSOLUTE);
+-        set_engine_of(TSEL, ENGI_PROPHET); apply_preset_to(TSEL, 0);
++        song.g[G_ROUTE] = 0;
++        set_engine_of(&trk[0], ENGI_PROPHET); song.sel = 0; apply_preset_to(TSEL, 0);
++        set_engine_of(&trk[1], 3); song.sel = 1; apply_preset_to(TSEL, 0);       /* track 2: LOFI PULSE LD */
++        song.sel = 1; go_page(GR_FXRACK);                                         /* track 2 shown, on FX */
+         const uint8_t ids[4] = {P5_CUTOFF,P5_RESONANCE,P5_ENV_FILTER,P5_RELEASE_AMP};
++        int16_t lofi[8]; memcpy(lofi, trk[1].p + P_E0, sizeof lofi);
+         for (uint32_t k = 0; k < 4; k++) {
+-            knob_cc(1, 20u + k, 64);
+-            uint8_t old = p5_patch_of(TSEL)->raw[ids[k]];
+-            bad += check("CC 20..23: a knob's first value only sets its place", p5_patch_of(TSEL)->raw[ids[k]] == old);
+-            knob_cc(2, 20u + k, 127);   /* (TRS: the same knob, another source) */
+-            knob_cc(1, 20u + k, 127);
+-            bad += check("CC 20..23 turn knobs 1..4 to their parameter's maximum, any MIDI KNOBS setting",
+-                         p5_patch_of(TSEL)->raw[ids[k]] == 127);
+-            knob_cc(1, 20u + k, 0);
+-            bad += check("CC 20..23 turn knobs 1..4 to their parameter's minimum", !p5_patch_of(TSEL)->raw[ids[k]]);
++            ch_cc(0, 20u + k, 127);
++            bad += check("CC 20..23 on channel 1 set track 1's Stage knobs (Prophet) to their maximum, at once",
++                         p5_patch_of(&trk[0])->raw[ids[k]] == 127);
++            ch_cc(0, 20u + k, 0);
++            bad += check("CC 20..23 on channel 1 set track 1's Stage knobs to their minimum", !p5_patch_of(&trk[0])->raw[ids[k]]);
+         }
+-        set_engine_of(TSEL, 3); apply_preset_to(TSEL, 0); go_home();   /* Stage: engine 3's knob 1 (LOFI's WAVE) */
++        bad += check("CC 20..23 leave the shown track and screen alone",
++                     song.sel == 1 && !memcmp(lofi, trk[1].p + P_E0, sizeof lofi) && cur_page()->graph == GR_FXRACK);
++        const engine_t *lf = ENGINES[3];
+         for (uint32_t k = 0; k < 4; k++) {
+-            knob_cc(1, 20u + k, 10); knob_cc(1, 20u + k, 127);
+-            d = home_param(k, &vp);
+-            bad += check("CC 20..23 follow whatever knobs 1..4 edit on the screen shown (Stage)", d && *vp == d->max);
+-            knob_cc(1, 20u + k, 0); d = home_param(k, &vp);
+-            bad += check("CC 20..23 reach a Stage parameter's minimum", d && *vp == d->min);
++            uint32_t id = lf->knob[k];
++            const param_desc_t *d = id >= P_E0 ? &lf->edit[id - P_E0] : &TP[id];
++            ch_cc(1, 20u + k, 127);
++            bad += check("CC 20..23 on channel 2 reach track 2's (LOFI) Stage parameters' maximum", trk[1].p[id] == d->max);
++            ch_cc(1, 20u + k, 0);
++            bad += check("CC 20..23 on channel 2 reach track 2's Stage parameters' minimum", trk[1].p[id] == d->min);
+         }
+-        for (uint32_t tr = 0; tr < NPART; tr++) {
+-            knob_cc(1, 24u + tr, 0);
+-            bad += check("CC 24..27 set tracks 1..4's LVL to its minimum", trk[tr].p[P_LEVEL] == TP[P_LEVEL].min);
+-            knob_cc(1, 24u + tr, 127);
+-            bad += check("CC 24..27 set tracks 1..4's LVL to its maximum", trk[tr].p[P_LEVEL] == TP[P_LEVEL].max);
+-        }
+-        trk[0].p[P_LEVEL] = trk[1].p[P_LEVEL] = 50;
+-        knob_cc(1, 25, 127);
+-        bad += check("CC 25 sets track 2 alone", trk[1].p[P_LEVEL] == TP[P_LEVEL].max && trk[0].p[P_LEVEL] == 50);
+-        mlearn[0] = (mlearn_t){.cc = 24, .track = 0, .page = 0xFF, .slot = 0};
+-        trk[0].p[P_LEVEL] = 50; route_input(1, 0xB0, 24, 0);
+-        bad += check("a learned CC 24 does what MIDI LEARN gave it, not track 1's LVL", trk[0].p[P_LEVEL] == 50);
++        /* CC 24: track 2's sound steps through its list, the first value only sets where the knob is */
++        song.sel = 0;
++        uint32_t e0 = trk[1].eng_req, p0 = trk[1].preset;
++        ch_cc(1, 24, 64);
++        bad += check("CC 24's first value only sets where the knob is", trk[1].eng_req == e0 && trk[1].preset == p0);
++        ch_cc(1, 24, 65);
++        bad += check("CC 24 steps channel 2's track to its next sound", trk[1].eng_req == e0 && trk[1].preset == p0 + 1u);
++        bad += check("CC 24 keeps the selected track and its sound", song.sel == 0 && trk[0].eng_req == ENGI_PROPHET);
++        ch_cc(1, 24, 64);
++        bad += check("CC 24 steps back", trk[1].eng_req == e0 && trk[1].preset == p0);
++        /* CC 91 / 93: the shared rack's REVERB and CHORUS MIX */
++        song.g[G_MFXTYPE] = FX_CHORUS; song.g[G_MFX2TYPE] = FX_OFF; song.g[G_MFX3TYPE] = FX_REVERB;
++        song.g[G_MFXMIX] = song.g[G_MFX3MIX] = 50;
++        ch_cc(2, 91, 127);
++        bad += check("CC 91 sets the shared REVERB's MIX", song.g[G_MFX3MIX] == 127 && song.g[G_MFXMIX] == 50);
++        ch_cc(2, 91, 0);
++        bad += check("CC 91 at 0: REVERB MIX 0", !song.g[G_MFX3MIX]);
++        ch_cc(3, 93, 127);
++        if (profile == MK_MINILAB)
++            bad += check("MINILAB keeps CC 93 as its knob 5", song.g[G_MFXMIX] == 50);
++        else
++            bad += check("CC 93 sets the shared CHORUS's MIX", song.g[G_MFXMIX] == 127);
++        song.g[G_MFX3TYPE] = FX_ROOM; song.g[G_MFX3MIX] = 50;
++        ch_cc(0, 91, 100);
++        bad += check("CC 91 sets ROOM's MIX when the rack has no REVERB", song.g[G_MFX3MIX] == 100);
++        song.g[G_MFX3TYPE] = FX_OFF; song.g[G_MFX3MIX] = 50;
++        ch_cc(0, 91, 10);
++        bad += check("CC 91 with no reverb in the rack changes nothing", song.g[G_MFX3MIX] == 50);
++        /* a MIDI Track's channel passes them on; MIDI LEARN wins */
++        set_engine_of(&trk[2], ENGI_MIDI); events_block(CTL); usb.config = 1; mo_r = mo_w = 0;
++        ch_cc(2, 20, 99);
++        bad += check("CC 20 on a MIDI Track's channel passes through", mo_r != mo_w && ((midi_out_q[mo_r % MQ] >> 16) & 127u) == 20);
++        p5_patch_of(&trk[0])->raw[P5_CUTOFF] = 40;
++        mlearn[0] = (mlearn_t){.cc = 20, .track = 3, .page = 0xFF, .slot = 0, .eng = 0xFF};
++        ch_cc(0, 20, 127);
++        bad += check("a learned CC 20 does what MIDI LEARN gave it", p5_patch_of(&trk[0])->raw[P5_CUTOFF] == 40);
+         memset(mlearn, 0, sizeof mlearn); mlearn_dirty = 0;
+     }
+     return bad;
+diff --git a/tests/run_tests.sh b/tests/run_tests.sh
+index 67d3976..3087d6c 100755
+--- a/tests/run_tests.sh
++++ b/tests/run_tests.sh
+@@ -375,8 +375,8 @@ if core && [ $TABLES = 1 ]; then
+     t "momentary snapshots: parameter IDs and native patch union restore exactly" ui_momentary_test -O1 $FW
+     t "USB/TRS clock, bend, sustain, ownership and panic recovery" midi_control_test -O1 $FW
+     t "CLK INT as MIDI master: clock, Start and Stop on the output queues, locked to the steps" midi_clock_out_test -O1 $FW
+-    t "MIDI panel knobs: profiles, native edits, encoder modes, CC 20..27 and bounded foreground dispatch" midi_knob_test -O1 $FW
+-    t "MIDI panel knobs and CC 20..27, shipping engines" midi_knob_felucca:midi_knob_test -O1 $FWS
++    t "MIDI panel knobs: profiles, native edits, encoder modes, CC 20..24, 91, 93 and bounded foreground dispatch" midi_knob_test -O1 $FW
++    t "MIDI panel knobs and CC 20..24, 91, 93, shipping engines" midi_knob_felucca:midi_knob_test -O1 $FWS
+     t "MIDI timing: quantized TRS/USB recording, audio timeline, tempo changes and timer wrap" midi_timing_test -O1 $FW
+     t "MIDI recording: raw events, quantization at take end, independent releases, banks and capacity" recording_test \
+         -O1 $FW
+diff --git a/web/manual/index.html b/web/manual/index.html
+index 8e4b7bf..3496836 100644
+--- a/web/manual/index.html
++++ b/web/manual/index.html
+@@ -1024,15 +1024,17 @@
+ 
+         <section id="midi-cc">
+           <h3>Fixed CCs</h3>
+-          <p>Eight CCs work whatever MIDI KNOBS is set to, on any channel ROUT admits:</p>
++          <p>These CCs work whatever MIDI KNOBS is set to and whatever the screen shows, on any channel ROUT admits to a synth or drum track. “The channel’s track” is the track that channel plays (ROUT CH1-4: channel 1 plays track 1, and so on; SEL: the selected track).</p>
+           <table>
+             <thead><tr><th>CC</th><th>Melodee control</th></tr></thead>
+             <tbody>
+-              <tr><td>20–23</td><td>KNOB1–4: whatever they edit on the screen shown (Stage, an EDIT page, FX), on the selected track</td></tr>
+-              <tr><td>24–27</td><td>LVL of tracks 1–4</td></tr>
++              <tr><td>20–23</td><td>The four Stage knobs of the channel’s track (its engine’s main controls, as KNOB1–4 on Stage). Absolute: the value is the control’s place across its range.</td></tr>
++              <tr><td>24</td><td>The channel’s track’s sound, as <kbd>PRESETS</kbd> steps it: every engine’s presets, then the user presets, as LIST shows them. One sound per step of the value; the first value only sets where the knob is. In a relative <strong>MIDI MODE</strong> it follows the encoder’s steps.</td></tr>
++              <tr><td>91</td><td>MIX of the shared rack’s REVERB (or ROOM, if it has no REVERB).</td></tr>
++              <tr><td>93</td><td>MIX of the shared rack’s CHORUS (or PEDAL CHORUS).</td></tr>
+             </tbody>
+           </table>
+-          <p>Values are absolute. For KNOB1–4, the first value only sets where the knob is; after that a parameter takes the value across its full range (0 = minimum, 127 = maximum), and navigation moves by the change. The LVL CCs set the level at once, as CC 7 does for a channel’s own track, and record as motion while recording. A CC bound with MIDI LEARN does what MIDI LEARN gave it instead. For a MiniLab 3, make a User template in Arturia’s MIDI Control Center with four knobs on CC 20–23 (absolute) and the four faders on CC 24–27.</p>
++          <p>CC 91 and 93 do nothing when the rack holds no such effect. A MIDI KNOBS profile’s own CCs come first (MINILAB uses CC 93 for its knob 5), then a CC bound with MIDI LEARN. A channel that plays a MIDI Track passes these CCs on to the external gear. For a MiniLab 3, make a User template in Arturia’s MIDI Control Center with four knobs on CC 20–23 (absolute), one knob on CC 24, and reverb and chorus on CC 91 and 93.</p>
+         </section>
+ 
+         <section id="midi-learn">
+-- 
+2.43.0
+
