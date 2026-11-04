@@ -1,0 +1,42 @@
+From 78afd1a10d211544f2c05d687d3251cd3cb3e416 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 4 Nov 2026 14:48:40 +0000
+Subject: [PATCH 5/5] tests: TRACKS' steal and engine-switch renders overran
+ their buffers
+
+steal_test and xfade_test render 4 s (176,400 samples) in 32-sample blocks; 176,400 is not a
+multiple of 32, so the last block wrote 16 samples past calloc(frames). The heap corruption
+aborted the run later ("double free or corruption"), before TRACKS' last checks. The buffers
+now hold the last whole block. Test harness only; present in upstream Melodee.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_0131vpfZVN4vprBnQkpmn5yn
+---
+ tests/hostsim.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/tests/hostsim.c b/tests/hostsim.c
+index b725e87..5b67b78 100644
+--- a/tests/hostsim.c
++++ b/tests/hostsim.c
+@@ -445,7 +445,7 @@ static int steal_test(const char *dir)
+     const uint32_t frames = 4u * FS;
+     char path[512];
+     FILE *w;
+-    int32_t prev = 0, *L = calloc(frames, sizeof *L);
++    int32_t prev = 0, *L = calloc(frames + CTL, sizeof *L);   /* (4 s is not whole blocks: the last one runs past) */
+     uint32_t f, i, p, k, events[6], nev = 0, bad = 0, kills0;
+     double worst = 0;
+     snprintf(path, sizeof path, "%s/steal.wav", dir);
+@@ -529,7 +529,7 @@ static int xfade_test(const char *dir)
+     const uint8_t to[4] = {ENGI_FM6, 2, 3, 4};
+     char path[512];
+     FILE *w;
+-    int32_t *L = calloc(frames, sizeof *L);
++    int32_t *L = calloc(frames + CTL, sizeof *L);              /* (4 s is not whole blocks: the last one runs past) */
+     uint32_t f, i, k, bad = 0, late_ok = 0;
+     double worst = 0;
+     track_t *t = &trk[0];
+-- 
+2.43.0
+

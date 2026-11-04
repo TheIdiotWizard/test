@@ -12,6 +12,7 @@ The firmware in `firmware/melodee-1.6.1.fwsc` is [keremimo/melodee](https://gith
    - CC 91 / 93: MIX of the shared rack's REVERB (or ROOM) / CHORUS (or PEDAL CHORUS)
 4. `0004-…` — fix (also in upstream Melodee): a key, or a ROUT SEL MIDI note, could play another track's sound
    when it arrived while the screen code briefly selected that track (Stage draws each track's row that way).
+5. `0005-…` — test harness only (also in upstream): TRACKS overran two 4-second render buffers and crashed.
 
 ```
 git clone https://github.com/keremimo/melodee && cd melodee && git checkout 165d177
